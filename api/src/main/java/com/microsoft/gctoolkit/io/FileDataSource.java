@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 package com.microsoft.gctoolkit.io;
 
+import com.microsoft.gctoolkit.jvm.Diary;
+
+import java.io.IOException;
 import java.nio.file.Path;
 
 /**
@@ -11,7 +14,6 @@ import java.nio.file.Path;
 public abstract class FileDataSource<T> implements DataSource<T> {
 
     protected final Path path;
-    protected final FileDataSourceMetaData metaData;
 
     /**
      * Subclass only.
@@ -19,8 +21,14 @@ public abstract class FileDataSource<T> implements DataSource<T> {
      */
     protected FileDataSource(Path path) {
         this.path = path;
-        this.metaData = new FileDataSourceMetaData(path);
     }
+
+    /**
+     * The Diary contains a summary of important properties of the log that will be used in orchestrating the
+     * setup and configuration of the internal components of GCToolkit.
+     * @return a diary.
+     */
+    abstract public Diary diary() throws IOException;
 
     /**
      * Return the path to the file in the file system.
@@ -33,10 +41,9 @@ public abstract class FileDataSource<T> implements DataSource<T> {
     /**
      * Return meta data about the file.
      * @return Meta data about the file.
+     * @throws IOException when there is an issue generating the diary
      */
-    public FileDataSourceMetaData getMetaData() {
-        return metaData;
-    }
+    public abstract LogFileMetadata getMetaData() throws IOException;
 
     /**
      * {@inheritDoc}

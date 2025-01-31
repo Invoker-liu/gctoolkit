@@ -20,83 +20,97 @@ public abstract class GCEvent extends JVMEvent {
     private final GarbageCollectionTypes gcType;
     private GCCause cause;
 
+    /**
+     *
+     * @param timeStamp for event
+     * @param gcType for event
+     * @param cause of event
+     * @param duration of event
+     */
     protected GCEvent(DateTimeStamp timeStamp, GarbageCollectionTypes gcType, GCCause cause, double duration) {
         super(timeStamp, duration);
         this.gcType = gcType;
         this.cause = cause;
     }
 
+    /**
+     *
+     * @param timeStamp for event
+     * @param duration of event
+     */
     protected GCEvent(DateTimeStamp timeStamp, double duration) {
         this(timeStamp, GarbageCollectionTypes.Unknown, GCCause.UNKNOWN_GCCAUSE, duration);
     }
 
+    /**
+     *
+     * @param timeStamp for event
+     * @param cause that triggered the event
+     * @param duration of event
+     */
     protected GCEvent(DateTimeStamp timeStamp, GCCause cause, double duration) {
         this(timeStamp, GarbageCollectionTypes.Unknown, cause, duration);
     }
 
+    /**
+     *
+     * @param timeStamp for event
+     * @param gcType of the event
+     * @param duration of the event
+     */
     protected GCEvent(DateTimeStamp timeStamp, GarbageCollectionTypes gcType, double duration) {
         this(timeStamp, gcType, GCCause.UNKNOWN_GCCAUSE, duration);
     }
 
+    /**
+     *
+     * @param cause of the event
+     */
     public void setGCCause(GCCause cause) {
         this.cause = cause;
     }
 
+    /**
+     *
+     * @return the cause of the event.
+     */
     public GCCause getGCCause() {
         return this.cause;
     }
 
+    /**
+     *
+     * @return the type of collection this event represents
+     */
     public GarbageCollectionTypes getGarbageCollectionType() {
         return gcType;
     }
 
-    public boolean isZGC() { return false; }
-
-    public boolean isYoung() {
-        return false;
-    }
-
-    public boolean isFull() {
-        return false;
-    }
-
-    public boolean isConcurrent() {
-        return false;
-    }
-
-    public boolean isG1Young() {
-        return false;
-    }
-
-    public boolean isG1Mixed() {
-        return false;
-    }
-
-    public boolean isG1Concurrent() {
-        return false;
-    }
-
-    public boolean isSystemGC() {
-        return false;
-    }
-
-    public boolean isConcurrentModeFailure() {
-        return false;
-    }
-
-    public boolean isConcurrentModeInterrupted() {
-        return false;
-    }
-
-    private static boolean withinThreshold(final double x, final double y) {
+    /**
+     *
+     * Is the distance between x and y larger than the provided threshold.
+     * @param x is a value
+     * @param y is a value
+     * @return boolean is diff is greater than threshold
+     */
+    private boolean withinThreshold(final double x, final double y) {
         return TIMESTAMP_THRESHOLD > Math.abs(x - y);
     }
 
+    /**
+     *
+     * @return hashCode
+     */
     @Override
     public int hashCode() {
         return Objects.hash(gcType.getLabel(),getDateTimeStamp().getTimeStamp(),getDuration());
     }
 
+    /**
+     *
+     * @param o the object to compare to.
+     * @return true is this equals o.
+     */
     public boolean equals(Object o) {
         if (o == this) return true;
         if (o == null || getClass() != o.getClass()) return false;

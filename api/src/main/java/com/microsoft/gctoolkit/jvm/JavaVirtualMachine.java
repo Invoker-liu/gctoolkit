@@ -3,11 +3,15 @@
 package com.microsoft.gctoolkit.jvm;
 
 
-import com.microsoft.gctoolkit.aggregator.Aggregation;
-import com.microsoft.gctoolkit.io.DataSource;
-import com.microsoft.gctoolkit.time.DateTimeStamp;
 import com.microsoft.gctoolkit.GCToolKit;
+import com.microsoft.gctoolkit.aggregator.Aggregation;
+import com.microsoft.gctoolkit.aggregator.Aggregator;
+import com.microsoft.gctoolkit.io.DataSource;
+import com.microsoft.gctoolkit.message.DataSourceChannel;
+import com.microsoft.gctoolkit.message.JVMEventChannel;
+import com.microsoft.gctoolkit.time.DateTimeStamp;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -15,6 +19,21 @@ import java.util.Optional;
  * An instance of JavaVirtualMachine is created by calling {@link GCToolKit#analyze(DataSource)}
  */
 public interface JavaVirtualMachine {
+
+    /**
+     * @param dataSource the log to be considered.
+     * Return {@code true} if the JavaVirtualMachine implementation can work with the GC log.
+     * @return {@code true} if the JavaVirtualMachine implementation can work with the GC Log.
+     */
+
+    boolean accepts(DataSource dataSource);
+
+    /**
+     * True if the log is unified or false for preunified
+     * @return true is the log is from JDK 9+
+     */
+
+    boolean isUnifiedLogging();
 
     /**
      * Return {@code true} if the JVM was using G1GC.
@@ -60,15 +79,22 @@ public interface JavaVirtualMachine {
 
     /**
      * Return the time of the first event in the GC log file.
-     * @return The time of the first event.
+     * @return The time of the last event.
      */
     DateTimeStamp getTimeOfFirstEvent();
+
+    /**
+     * Estimates the initial start time of the log in the case that the log
+     * is determined to be a fragment. Otherwise, return a start time of 0.000 seconds
+     * @return The time of the first event.
+     */
+    DateTimeStamp getEstimatedJVMStartTime();
 
     /**
      * Return the time of the last event in the GC log file.
      * @return The time of the last event.
      */
-    DateTimeStamp getTimeOfLastEvent();
+    DateTimeStamp getJVMTerminationTime();
 
     /**
      * Return the runtime duration. This is not necessarily the difference
@@ -77,13 +103,6 @@ public interface JavaVirtualMachine {
      * @return The runtime duration that the GC log represents.
      */
     double getRuntimeDuration();
-
-    /**
-     * Get the configuration metadata. This configuration data is either
-     * known from JVM flags, or inferred from parsing the GC log file.
-     * @return The {@code JvmConfiguration}
-     */
-    JvmConfiguration getJvmConfiguration();
 
     /**
      * Return the {@code Aggregation} that was used in the analysis of the GC log file
@@ -97,4 +116,12 @@ public interface JavaVirtualMachine {
      * if given aggregationClass is not available.
      */
     <T extends Aggregation> Optional<T> getAggregation(Class<T> aggregationClass);
+
+    /**
+     * Interface to trigger the analysis of a gc log.
+     * @param registeredAggregations all aggregations supplied by the module SPI
+     * @param eventChannel JVMEvent message channel
+     * @param dataSourceChannel GC logging data channel
+     */
+    void analyze(List<Aggregator<? extends Aggregation>> registeredAggregations, JVMEventChannel eventChannel, DataSourceChannel dataSourceChannel);
 }

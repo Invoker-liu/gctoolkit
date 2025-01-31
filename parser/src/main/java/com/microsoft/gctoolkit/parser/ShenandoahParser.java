@@ -2,14 +2,19 @@
 // Licensed under the MIT License.
 package com.microsoft.gctoolkit.parser;
 
+import com.microsoft.gctoolkit.GCToolKit;
+import com.microsoft.gctoolkit.aggregator.EventSource;
 import com.microsoft.gctoolkit.event.jvm.JVMEvent;
 import com.microsoft.gctoolkit.event.jvm.JVMTermination;
+import com.microsoft.gctoolkit.jvm.Diary;
+import com.microsoft.gctoolkit.message.ChannelName;
+import com.microsoft.gctoolkit.message.JVMEventChannel;
 import com.microsoft.gctoolkit.parser.collection.MRUQueue;
-import com.microsoft.gctoolkit.parser.jvm.LoggingDiary;
 import com.microsoft.gctoolkit.parser.unified.ShenandoahPatterns;
 
 import java.util.AbstractMap;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -30,8 +35,6 @@ public class ShenandoahParser extends UnifiedGCLogParser implements ShenandoahPa
 
     private static final Logger LOGGER = Logger.getLogger(ShenandoahParser.class.getName());
 
-    private final boolean debugging = Boolean.getBoolean("microsoft.debug");
-
     private final MRUQueue<GCParseRule, BiConsumer<GCLogTrace, String>> parseRules;
 
     {
@@ -39,8 +42,11 @@ public class ShenandoahParser extends UnifiedGCLogParser implements ShenandoahPa
         parseRules.put(END_OF_FILE,this::endOfFile);
     }
 
-    public ShenandoahParser(LoggingDiary diary, JVMEventConsumer consumer) {
-        super(diary, consumer);
+    public ShenandoahParser() {}
+
+    @Override
+    public Set<EventSource> eventsProduced() {
+        return Set.of(EventSource.SHENANDOAH);
     }
 
     @Override
@@ -79,24 +85,23 @@ public class ShenandoahParser extends UnifiedGCLogParser implements ShenandoahPa
     }
 
     public void endOfFile(GCLogTrace trace, String line) {
-        record(new JVMTermination(getClock()));
+        publish(new JVMTermination(getClock(),diary.getTimeOfFirstEvent()));
     }
 
     //Implement all capture methods
 
     private void log(String line) {
-        if (debugging)
-            LOGGER.log(Level.FINE,"ZGCHeapParser missed: {0}", line);
+        GCToolKit.LOG_DEBUG_MESSAGE(() -> "ZGCHeapParser missed: " + line);
         LOGGER.log(Level.WARNING, "Missed: {0}", line);
 
     }
 
-    public void record() {
-        record(forwardReference.toShenandoahCycle());
+    public void publish() {
+        publish(forwardReference.toShenandoahCycle());
     }
 
-    public void record(JVMEvent event) {
-        consumer.record(event);
+    public void publish(JVMEvent event) {
+        super.publish(ChannelName.SHENANDOAH_PARSER_OUTBOX, event);
         forwardReference = null;
     }
 
@@ -109,5 +114,14 @@ public class ShenandoahParser extends UnifiedGCLogParser implements ShenandoahPa
         }
     }
 
+    @Override
+    public boolean accepts(Diary diary) {
+        return diary.isShenandoah();
+    }
+
+    @Override
+    public void publishTo(JVMEventChannel bus) {
+        super.publishTo(bus);
+    }
 
 }

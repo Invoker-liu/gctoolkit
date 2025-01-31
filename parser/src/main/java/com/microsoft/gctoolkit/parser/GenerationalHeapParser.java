@@ -2,17 +2,26 @@
 // Licensed under the MIT License.
 package com.microsoft.gctoolkit.parser;
 
+import com.microsoft.gctoolkit.GCToolKit;
+import com.microsoft.gctoolkit.aggregator.EventSource;
 import com.microsoft.gctoolkit.event.CPUSummary;
 import com.microsoft.gctoolkit.event.GCCause;
 import com.microsoft.gctoolkit.event.GarbageCollectionTypes;
 import com.microsoft.gctoolkit.event.MemoryPoolSummary;
 import com.microsoft.gctoolkit.event.ReferenceGCSummary;
+import com.microsoft.gctoolkit.event.generational.AbortablePreClean;
 import com.microsoft.gctoolkit.event.generational.BinaryTreeDictionary;
+import com.microsoft.gctoolkit.event.generational.CMSConcurrentEvent;
 import com.microsoft.gctoolkit.event.generational.CMSRemark;
+import com.microsoft.gctoolkit.event.generational.ConcurrentMark;
 import com.microsoft.gctoolkit.event.generational.ConcurrentModeFailure;
 import com.microsoft.gctoolkit.event.generational.ConcurrentModeInterrupted;
+import com.microsoft.gctoolkit.event.generational.ConcurrentPreClean;
+import com.microsoft.gctoolkit.event.generational.ConcurrentReset;
+import com.microsoft.gctoolkit.event.generational.ConcurrentSweep;
 import com.microsoft.gctoolkit.event.generational.DefNew;
 import com.microsoft.gctoolkit.event.generational.FullGC;
+import com.microsoft.gctoolkit.event.generational.GenerationalGCPauseEvent;
 import com.microsoft.gctoolkit.event.generational.InitialMark;
 import com.microsoft.gctoolkit.event.generational.PSFullGC;
 import com.microsoft.gctoolkit.event.generational.PSYoungGen;
@@ -22,13 +31,16 @@ import com.microsoft.gctoolkit.event.generational.SystemGC;
 import com.microsoft.gctoolkit.event.generational.YoungGC;
 import com.microsoft.gctoolkit.event.jvm.JVMEvent;
 import com.microsoft.gctoolkit.event.jvm.JVMTermination;
-import com.microsoft.gctoolkit.time.DateTimeStamp;
+import com.microsoft.gctoolkit.jvm.Diary;
+import com.microsoft.gctoolkit.message.ChannelName;
+import com.microsoft.gctoolkit.message.JVMEventChannel;
 import com.microsoft.gctoolkit.parser.collection.MRUQueue;
-import com.microsoft.gctoolkit.parser.jvm.LoggingDiary;
+import com.microsoft.gctoolkit.time.DateTimeStamp;
 
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -72,10 +84,11 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     private int numberOfBlocksForwardReference;
     private long averageBlockSizeForwardReference;
     private int treeHeightForwardReference;
-    private final boolean debugging = Boolean.getBoolean("microsoft.debug");
 
     //Expect Remark
     private boolean expectRemark = false;
+    private boolean inConcurrentPhase = false;
+    private boolean abortPrecleanDueToTime = false;
 
     /* Rules not used....
         GCParseRule FULL_PARNEW_CMF_META
@@ -97,7 +110,6 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         parseRules.put(DEFNEW, this::defNew);
         parseRules.put(DEFNEW_TENURING, this::defNewWithTenuring);
         parseRules.put(SERIAL_FULL, this::serialFull);
-        parseRules.put(SERIAL_FULL80, this::serialFull80);
         parseRules.put(PARNEW, this::parNew);
         parseRules.put(PARNEW_TENURING, this::parNewWithTenuring);
         parseRules.put(PARNEW_CONCURRENT_MODE_END, this::parNewConcurrentModeEnd);
@@ -143,29 +155,27 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         parseRules.put(CORRUPTED_PARNEW_BODY, this::corruptedParNewBody);
         parseRules.put(CONCURRENT_PHASE_START, this::concurrentPhaseStart);
         parseRules.put(CONCURRENT_PHASE_END, this::concurrentPhaseEnd);
-        parseRules.put(ABORT_PRECLEAN_DUE_TO_TIME_CLAUSE, this::abortPrecleanDueToTimeClause);
+        parseRules.put(CONCURRENT_PHASE_END_WITH_CPU_SUMMARY, this::concurrentPhaseEnd);
         parseRules.put(INITIAL_MARK, this::initialMark);
         parseRules.put(SCAVENGE_BEFORE_REMARK, this::scavengeBeforeRemark);
         parseRules.put(SCAVENGE_BEFORE_REMARK_TENURING, this::scavengeBeforeRemarkTenuring);
-        parseRules.put(PARALLEL_REMARK_WEAK_REF, this::remarkAt12);
-        parseRules.put(PARALLEL_REMARK_CLASS_UNLOADING, this::remarkAt21);
+        parseRules.put(PARALLEL_REMARK_WEAK_REF, this::recordRemark);
+        parseRules.put(PARALLEL_REMARK_CLASS_UNLOADING, this::recordRemark);
         parseRules.put(REMARK_PARNEW_PROMOTION_FAILED, this::remarkParNewPromotionFailed);
         parseRules.put(PARALLEL_REMARK_STRING_SYMBOL, this::parallelRemarkStringSymbolClause);
-        parseRules.put(PARALLEL_REMARK_WEAK_CLASS_SYMBOL_STRING, this::remarkAt21);
-        parseRules.put(PARALLEL_REMARK_WEAK_STRING, this::remarkAt15);
+        parseRules.put(PARALLEL_REMARK_WEAK_CLASS_SYMBOL_STRING, this::recordRemark);
+        parseRules.put(PARALLEL_REMARK_WEAK_STRING, this::recordRemark);
         parseRules.put(PARALLEL_RESCAN, this::parallelRescan);
-        parseRules.put(REMARK, this::remarkAt11);
-        parseRules.put(PARALLEL_RESCAN_V2, this::remarkAt11);
-        parseRules.put(PARALLEL_RESCAN_WEAK_CLASS_SCRUB, this::remarkAt13);
+        parseRules.put(REMARK, this::recordRemark);
+        parseRules.put(PARALLEL_RESCAN_V2, this::recordRemark);
+        parseRules.put(PARALLEL_RESCAN_WEAK_CLASS_SCRUB, this::recordRemark);
         //, 0.1127040 secs]220.624: [weak refs processing, 0.1513820 secs] [1 CMS-remark: 10541305K(16777216K)] 10742883K(18664704K), 0.7371020 secs]
         //todo: this was capturing records that is shouldn't have so the rule was modified.. now does it work??? Needs through testing now that order of evaluation will change
-        parseRules.put(REMARK_DETAILS, this::remarkAt1);
-        parseRules.put(SERIAL_REMARK_SCAN_BREAKDOWNS, this::remarkAt15);
-        parseRules.put(REMARK_DETAILS, this::remarkAt1);
-        parseRules.put(SERIAL_REMARK_SCAN_BREAKDOWNS, this::remarkAt15);
+        parseRules.put(SERIAL_REMARK_SCAN_BREAKDOWNS, this::recordRemark);
+        parseRules.put(REMARK_DETAILS, this::recordRemark);
         parseRules.put(REMARK_REFERENCE_PROCESSING, this::recordRemarkWithReferenceProcessing);
         parseRules.put(TENURING_DETAILS, this::tenuringDetails);
-        parseRules.put(RESCAN_WEAK_CLASS_SYMBOL_STRING, this::remarkAt11);
+        parseRules.put(RESCAN_WEAK_CLASS_SYMBOL_STRING, this::rescanWeakClassSymbolString);
         parseRules.put(CONCURRENT_MODE_FAILURE_DETAILS, this::concurrentModeFailureDetails);
         parseRules.put(CONCURRENT_MODE_FAILURE_DETAILS_META, this::concurrentModeFailureDetails);
         parseRules.put(PARNEW_DETAILS_CONCURRENT_MODE_FAILURE_PERM, this::parNewDetailsConcurrentModeFailure);
@@ -173,12 +183,12 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         parseRules.put(PARNEW_DETAILS_PROMOTION_FAILED_WITH_CMS_PHASE, this::parNewDetailsPromotionFailedWithConcurrentMarkSweepPhase);
         parseRules.put(PARNEW_DETAILS_WITH_CONCURRENT_MODE_FAILURE, this::parNewDetailsWithConcurrentModeFailure);
         parseRules.put(CONCURRENT_MODE_FAILURE_REFERENCE, this::concurrentModeFailureReference);
-        parseRules.put(iCMS_PARNEW_DEFNEW_TENURING_DETAILS, this::iCMSParNewDefNewTenuringDetails);
         parseRules.put(iCMS_CONCURRENT_MODE_FAILURE, this::iCMSConcurrentModeFailure);
         parseRules.put(iCMS_CONCURRENT_MODE_FAILURE_META, this::iCMSConcurrentModeFailure);
         parseRules.put(iCMS_CMF_DUIRNG_PARNEW_DEFNEW_DETAILS, this::iCMSConcurrentModeFailureDuringParNewDefNewDetails);
         parseRules.put(FULL_GC_INTERRUPTS_CONCURRENT_PHASE, this::fullGCInterruptsConcurrentPhase);
         parseRules.put(FULL_PARNEW_START, this::fullParNewStart);
+        parseRules.put(CMS_FULL_80, this::psFullReferenceJDK8);
         parseRules.put(FULL_GC_REFERENCE_CMF, this::fullGCReferenceConcurrentModeFailure);
 
         parseRules.put(iCMS_PARNEW, this::iCMSParNew);
@@ -188,8 +198,8 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         parseRules.put(iCMS_PARNEW_DEFNEW_TENURING_DETAILS, this::iCMSParNewDefNewTenuringDetails);
         parseRules.put(iCMS_FULL, this::iCMSFullGC);
         parseRules.put(iCMS_PROMOTION_FAILED, this::iCMSPromotionFailed);
-        parseRules.put(iCMS_PROMOTION_FAILED_PERM, this::iCMSPromotionFailedPermMeta);
-        parseRules.put(iCMS_PROMOTION_FAILED_META, this::iCMSPromotionFailedPermMeta);
+//        parseRules.put(iCMS_PROMOTION_FAILED_PERM, this::iCMSPromotionFailedPermMeta); // todo: this rule and the next appear to be a duplication of iCMS_PARNEW_PROMOTION_FAILURE
+//        parseRules.put(iCMS_PROMOTION_FAILED_META, this::iCMSPromotionFailedPermMeta);
         parseRules.put(iCMS_MISLABELED_FULL, this::iCMSMislabeledFull);
         parseRules.put(iCMS_FULL_AFTER_CONCURRENT_MODE_FAILURE, this::iCMSFullAfterConcurrentModeFailure);
         parseRules.put(iCMS_FULL_AFTER_CONCURRENT_MODE_FAILURE_META, this::iCMSFullAfterConcurrentModeFailure);
@@ -200,7 +210,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         parseRules.put(FULL_PARNEW_CMF_META, this::fullParNewConcurrentModeFailureMeta);
         parseRules.put(FULL_PARNEW_CMF_PERM, this::fullParNewConcurrentModeFailurePerm);
         parseRules.put(PARNEW_CONCURRENT_MODE_FAILURE_PERM, this::parNewConcurrentModeFailurePerm);
-        parseRules.put(PARNEW_CONCURRENT_MODE_FAILURE_META, this::parNewConcurrentModeFailureMeta);
+        parseRules.put(PARNEW_CONCURRENT_MODE_FAILURE_META, this::parNewConcurrentModeFailurePerm);
         parseRules.put(PS_FULL_GC_V2_PERM, this::psFullGCV2Perm);
         parseRules.put(PS_FULL_GC_PERM, this::psFullGCPerm);
         parseRules.put(CMS_FULL_PERM, this::cmsFullPermOrMeta);
@@ -263,12 +273,20 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         parseRules.put(CMF_LARGE_BLOCK, this::concurrentModeFailureSplitByLargeBlock);
         parseRules.put(WEAK_PROCESSING, this::noop);
 
-
+        //this rule must be evaluated before CONCURRENT_PHASE_END_BLOCK
+        parseRules.put(ABORT_PRECLEAN_DUE_TO_TIME_CLAUSE, this::abortPrecleanDueToTime);
+        parseRules.put(CONCURRENT_PHASE_CARDS, this::abortPrecleanWithCards);
+        parseRules.put(PRECLEAN_REFERENCE, this::endConcurrentPrecleanWithReferenceProcessing);
+        parseRules.put( new GCParseRule("FLOATING_CPU_BREAKOUT", "^" + CPU_SUMMARY), this::noop);
         parseRules.put(new GCParseRule("END_OF_DATA_SENTINEL", END_OF_DATA_SENTINEL), this::endOfFile);
     }
 
-    public GenerationalHeapParser(LoggingDiary diary, JVMEventConsumer consumer) {
-        super(diary, consumer);
+    public GenerationalHeapParser() {
+    }
+
+    @Override
+    public Set<EventSource> eventsProduced() {
+        return Set.of(EventSource.GENERATIONAL);
     }
 
     @Override
@@ -299,61 +317,42 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         log(line);
     }
 
-    // TODO #151 populate with lines that should be ignored
-    // private boolean inPrintHeapAtGC = false;
-
     private boolean ignoreFrequentButUnwantedEntries(String line) {
 
-//         if ( deriveConfiguration.hasApplicationRunningTime()) {
         if (JVMPatterns.APPLICATION_TIME.parse(line) != null) return true;
         if (JVMPatterns.SIMPLE_APPLICATION_TIME.parse(line) != null) return true;
-        //         }
 
-//         if ( deriveConfiguration.hasApplicationStoppedTime()) {
         if (JVMPatterns.APPLICATION_STOP_TIME.parse(line) != null) return true;
         if (JVMPatterns.APPLICATION_STOP_TIME_WITH_STOPPING_TIME.parse(line) != null) return true;
         if (JVMPatterns.SIMPLE_APPLICATION_STOP_TIME.parse(line) != null) return true;
-//         }
 
-//         if ( deriveConfiguration.hasTenuringDistribution()) {
         if (TenuredPatterns.TENURING_SUMMARY.parse(line) != null) return true;
         if (TenuredPatterns.TENURING_AGE_BREAKDOWN.parse(line) != null) return true;
-//         }
-
-//         if ( ! deriveConfiguration.isJDK70()) {
-//             if ( line.contains("Metaspace ")) return true;
-//             if ( line.contains("class space ")) return true;
-//         }
 
         if (line.startsWith("TLAB: gc thread: ")) return true;
         if (line.startsWith("TLAB totals: thrds: ")) return true;
 
-//         if ( deriveConfiguration.hasPrintHeapAtGC()) {
         if (line.startsWith("{Heap before")) {
-            // inPrintHeapAtGC = true;
             return true;
         }
         if (line.equals("}")) {
-            // inPrintHeapAtGC = false;
             return true;
         }
 
-//             if ( inPrintHeapAtGC) {
+        if (line.startsWith("Heap")) return true;
         if (line.startsWith("Heap after")) return true;
         if (line.startsWith("PSYoungGen")) return true;
         if (line.startsWith("ParOldGen")) return true;
         if (line.startsWith("PSOldGen")) return true;
         if (line.startsWith("PSPermGen")) return true;
+        if (line.startsWith("concurrent mark-sweep")) return true;
         if (line.startsWith("object space")) return true;
         if (line.startsWith("eden space")) return true;
         if (line.startsWith("from space")) return true;
         if (line.startsWith("to   space")) return true;
-        if (line.contains("[0xffff") && line.endsWith("000)")) ;
-//             }
+        if (line.contains("[0xffff") && line.endsWith("000)")) return true;
 
-        // TODO #152 remove when we start collecting this information
         if (line.startsWith("Finished ")) return true;
-//         }
 
         if (line.startsWith("GC locker: Trying a full collection because scavenge failed")) return true;
 
@@ -366,25 +365,25 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     }
 
     public void endOfFile(GCLogTrace trace, String line) {
-        record(new JVMTermination(getClock()));
+        publish(new JVMTermination(getClock(),diary.getTimeOfFirstEvent()), true);
     }
 
     public void defNew(GCLogTrace trace, String line) {
         DefNew defNew = new DefNew(getClock(), trace.gcCause(), trace.getDuration());
-        defNew.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(7), this.getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 14));
+        defNew.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(13), this.getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 20));
         defNew.add(extractCPUSummary(line));
-        record(defNew);
+        publish(defNew);
     }
 
     //2019-10-22T23:41:21.852+0000: 21.912: [GC (GCLocker Initiated GC) 2019-10-22T23:41:21.853+0000: 21.912: [DefNew2019-10-22T23:41:21.914+0000: 21.974: [SoftReference, 0 refs, 0.0000842 secs]2019-10-22T23:41:21.914+0000: 21.974: [WeakReference, 76 refs, 0.0000513 secs]2019-10-22T23:41:21.914+0000: 21.974: [FinalReference, 91635 refs, 0.0396861 secs]2019-10-22T23:41:21.954+0000: 22.014: [PhantomReference, 0 refs, 3 refs, 0.0000444 secs]2019-10-22T23:41:21.954+0000: 22.014: [JNI Weak Reference, 0.0000281 secs]: 419520K->19563K(471936K), 0.1019514 secs] 502104K->102148K(2044800K), 0.1020469 secs] [Times: user=0.09 sys=0.01, real=0.10 secs]
     public void defNewDetails(GCLogTrace trace, String line) {
         DefNew defNew = new DefNew(getClock(), trace.gcCause(), trace.getDuration());
-        MemoryPoolSummary heap = this.getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 37);
-        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(30);
+        MemoryPoolSummary heap = this.getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 58);
+        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(51);
         defNew.add(young, heap.minus(young), heap);
         defNew.add(extractCPUSummary(line));
         defNew.add(extractPrintReferenceGC(line));
-        record(defNew);
+        publish(defNew);
     }
 
     public void defNewWithTenuring(GCLogTrace trace, String line) {
@@ -400,28 +399,16 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         collection.add(heap.minus(tenured), tenured, heap);
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
-    }
-
-
-    //3.299: [Full GC (Metadata GC Threshold) 3.299: [Tenured: 21006K->20933K(21888K), 0.0230475 secs] 29003K->20933K(31680K), [Metapace: 12111K->12111K(12672K)], 0.0231557 secs]
-    public void serialFull80(GCLogTrace trace, String line) {
-        FullGC collection = new FullGC(getClock(), trace.gcCause(), trace.getDoubleGroup(trace.groupCount()));
-        MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(5);
-        MemoryPoolSummary heap = this.getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 12);
-        collection.add(heap.minus(tenured), tenured, heap);
-        collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
-        collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     //62.616: [GC 62.616: [ParNew: 5033216K->129451K(5662336K), 0.2536590 secs] 5097075K->193310K(24536704K), 0.2538510 secs]
     //48.021: [GC48.021: [ParNew: 306686K->34046K(306688K), 0.3196120 secs] 1341473K->1125818K(8669952K), 0.3197540 secs]
     public void parNew(GCLogTrace trace, String line) {
-        ParNew collection = new ParNew(getClock(), trace.gcCause(1), trace.getDoubleGroup(20));
-        collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(7), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 14));
+        ParNew collection = new ParNew(getClock(), trace.gcCause(1), trace.getDuration());
+        collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(13), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 20));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     //9.811: [GC 9.811: [ParNew
@@ -475,14 +462,14 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
             cmf.add(heapForwardReference.minus(tenuredForwardReference), tenuredForwardReference, heapForwardReference);
             cmf.add(extractCPUSummary(line));
             cmf.addBinaryTreeDictionary(new BinaryTreeDictionary(totalFreeSpaceForwardReference, maxChunkSizeForwardReference, numberOfBlocksForwardReference, averageBlockSizeForwardReference, treeHeightForwardReference));
-            record(parNew);
-            record(cmf);
+            publish(parNew);
+            publish(cmf);
         } else if (garbageCollectionTypeForwardReference == GarbageCollectionTypes.ParNew) {
             ParNew collection = new ParNew(scavengeTimeStamp, gcCauseForwardReference, trace.getPauseTime());
             collection.add(youngMemoryPoolSummaryForwardReference, heapForwardReference);
             collection.add(extractCPUSummary(line));
             collection.addBinaryTreeDictionary(new BinaryTreeDictionary(totalFreeSpaceForwardReference, maxChunkSizeForwardReference, numberOfBlocksForwardReference, averageBlockSizeForwardReference, treeHeightForwardReference));
-            record(collection);
+            publish(collection);
         } else if (garbageCollectionTypeForwardReference == GarbageCollectionTypes.ConcurrentModeFailure) {
             MemoryPoolSummary heap = new MemoryPoolSummary(heapForwardReference.getOccupancyBeforeCollection(), heapForwardReference.getSizeAfterCollection(), heapForwardReference.getOccupancyBeforeCollection(), heapForwardReference.getSizeAfterCollection());
             double portionOfPauseToSubtract =  ( parNewForwardReference == null) ? 0.0d : parNewForwardReference.getDuration();
@@ -494,16 +481,17 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
             // some concurrent mode failure conditions do not involve a young generational collection
             if ( parNewForwardReference != null) {
                 parNewForwardReference.add(youngMemoryPoolSummaryForwardReference, heap.minus(youngMemoryPoolSummaryForwardReference), heap);
-                record(parNewForwardReference);
+                publish(parNewForwardReference);
             }
-            record(concurrentModeFailure);
+            publish(concurrentModeFailure);
         } else if (garbageCollectionTypeForwardReference == GarbageCollectionTypes.FullGC) {
             MemoryPoolSummary heap = new MemoryPoolSummary(heapForwardReference.getOccupancyBeforeCollection(), heapForwardReference.getSizeAfterCollection(), heapForwardReference.getOccupancyBeforeCollection(), heapForwardReference.getSizeAfterCollection());
             FullGC fullGc = new FullGC(fullGCTimeStamp, gcCauseForwardReference, trace.getDuration());
             fullGc.add(heap);
-            record(fullGc);
+            fullGc.add(extractCPUSummary(line));
+            publish(fullGc);
         } else
-            trace.notYetImplemented();
+            LOGGER.warning("Unable to parse -> " + trace);
     }
 
     private void parNewFLSHeader(GCLogTrace trace, String line) {
@@ -548,16 +536,17 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     //public static final ParseRule PARNEW_CONCURRENT_MODE_END = new ParseRule (GC_PREFIX + PARNEW_BLOCK + TIMESTAMP + "\\[CMS" + CMS_PHASE_END + "(?: " + CPU_BREAKDOWN + ")?$");
     //public static final String CMS_PHASE_END = DATE_TIMESTAMP + "\\[CMS-concurrent-(.+): " + CPU_WALLCLOCK + "\\]";
     public void parNewConcurrentModeEnd(GCLogTrace trace, String line) {
+        concurrentPhaseEnd(trace,line,23);
         garbageCollectionTypeForwardReference = GarbageCollectionTypes.ParNew;
         scavengeTimeStamp = getClock();
         gcCauseForwardReference = trace.gcCause();
-        scavengeDurationForwardReference = trace.getDoubleGroup(12);
+        scavengeDurationForwardReference = trace.getDoubleGroup(18);
         parNewForwardReference = new ParNew(scavengeTimeStamp, garbageCollectionTypeForwardReference, gcCauseForwardReference, scavengeDurationForwardReference);
-        youngMemoryPoolSummaryForwardReference = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(6);
+        youngMemoryPoolSummaryForwardReference = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(12);
     }
 
     public void parNewCardTable(GCLogTrace trace, String line) {
-        trace.notYetImplemented();
+        LOGGER.warning("Not Yet Implemented -> " + trace);
     }
 
 
@@ -565,13 +554,13 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     //89.260: [GC 89.260: [ParNew: 19135K->19135K(19136K), 0.0000156 secs]89.260: [CMS: 105875K->107775K(107776K), 0.5703972 secs] 125011K->116886K(126912K), [CMS Perm : 15589K->15584K(28412K)], 0.5705219 secs]
     public void parNewToConcurrentModeFailure(GCLogTrace trace, String line) {
         ConcurrentModeFailure collection = new ConcurrentModeFailure(getClock(), trace.gcCause(), trace.getDoubleGroup(trace.groupCount()));
-        collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(6), trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(15), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 22));
+        collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(12), trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(24), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 31));
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
-    //Very rare occurence where ParNew suffers from a promotion failure during the reset. This is, and isn't a CMF but will be treated as one.
+    //Very rare occurrence where ParNew suffers from a promotion failure during the reset. This is, and isn't a CMF but will be treated as one.
     public void parNewToPsudoConcurrentModeFailure(GCLogTrace trace, String line) {
         ConcurrentModeFailure collection = new ConcurrentModeFailure(scavengeTimeStamp, GCCause.PROMOTION_FAILED, trace.getDoubleGroup(trace.groupCount()));
         MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1);
@@ -579,18 +568,18 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         collection.add(heap.minus(tenured), tenured, heap);
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
 
     }
 
     public void parNewReference(GCLogTrace trace, String line) {
         ParNew gcEvent = new ParNew(trace.getDateTimeStamp(), trace.gcCause(), trace.getDuration());
-        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(30);
-        MemoryPoolSummary heap = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(37);
+        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(51);
+        MemoryPoolSummary heap = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(58);
         gcEvent.add(young, heap.minus(young), heap);
         gcEvent.addReferenceGCSummary(extractPrintReferenceGC(line));
         gcEvent.add(extractCPUSummary(line));
-        record(gcEvent);
+        publish(gcEvent);
     }
 
     public void parNewReferenceSplit(GCLogTrace trace, String line) {
@@ -623,12 +612,12 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
 
     //GenerationalHeapParser, not implemented: 2015-07-06T15:18:19.465-0700: 483260.591: [GC (Allocation Failure) 483260.592: [ParNew (promotion failed): 2146944K->2146944K(2146944K), 0.9972460 secs] 20182045K->20340243K(20732992K), 0.9975730 secs
     public void parNewPromotionFailed(GCLogTrace trace, String line) {
-        ParNewPromotionFailed collection = new ParNewPromotionFailed(getClock(), GCCause.PROMOTION_FAILED, trace.getDoubleGroup(trace.groupCount()));
-        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(6);
-        MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 13);
+        ParNewPromotionFailed collection = new ParNewPromotionFailed(getClock(), GCCause.PROMOTION_FAILED, trace.getDuration());
+        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(12);
+        MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 19);
         collection.add(young, heap);
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     public void parNewPromotionFailedDetails(GCLogTrace trace, String line) {
@@ -677,13 +666,13 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
      * @param line The GC log line being parsed
      */
     public void parNewPromotionFailedInConcurrentMarkSweepPhase(GCLogTrace trace, String line) {
-        int offset = (trace.groupCount() == 16) ? 2 : 0;
+        concurrentPhaseEnd(trace,line,15);
+        int offset = (trace.groupCount() == 23) ? 0 : 2;
         scavengeTimeStamp = getClock();
         garbageCollectionTypeForwardReference = GarbageCollectionTypes.ParNewPromotionFailed;
         gcCauseForwardReference = GCCause.PROMOTION_FAILED;
-        youngMemoryPoolSummaryForwardReference = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(5 - offset);
-        scavengeDurationForwardReference = trace.getDoubleGroup(11 - offset);
-        scavengeCPUSummaryForwardReference = extractCPUSummary(line);
+        youngMemoryPoolSummaryForwardReference = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(8 - offset);
+        scavengeDurationForwardReference = trace.getDoubleGroup(14 - offset);
     }
 
     //364.157: [GC 364.157: [ParNew: 235968K->235968K(235968K), 0.0000430 secs]364.157: [CMSbailing out to foreground collection
@@ -699,34 +688,34 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         scavengeTimeStamp = getClock();
         garbageCollectionTypeForwardReference = GarbageCollectionTypes.ParNew;
         gcCauseForwardReference = trace.gcCause();
-        youngMemoryPoolSummaryForwardReference = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(6);
+        youngMemoryPoolSummaryForwardReference = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(12);
         scavengeDurationForwardReference = trace.getDoubleGroup(trace.groupCount() - 1);
     }
 
     //14921.473: [GC14921.473: [ParNew (promotion failed): 609300K->606029K(629120K), 0.1794470 secs]14921.652: [CMS: 1224499K->1100531K(1398144K), 3.4546330 secs] 1829953K->1100531K(2027264K), [CMS Perm : 148729K->148710K(262144K)], 3.6342950 secs]
     //84.977: [GC 84.977: [ParNew (promotion failed): 17024K->19136K(19136K), 0.0389515 secs]85.016: [CMS: 107077K->107775K(107776K), 0.2868956 secs] 109258K->107895K(126912K), [CMS Perm : 10680K->10674K(21248K)], 0.3260017 secs] [Times: user=0.37 sys=0.00, real=0.32 secs]
     public void promotionFailedToFull(GCLogTrace trace, String line) {
-        ParNewPromotionFailed youngCollection = new ParNewPromotionFailed(getClock(), GCCause.PROMOTION_FAILED, trace.getDoubleGroup(12));
-        MemoryPoolSummary youngGen = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(6);
-        MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(15);
-        MemoryPoolSummary totalHeap = this.getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 22);
+        double youngDuration = trace.getDoubleGroup(18);
+        ParNewPromotionFailed youngCollection = new ParNewPromotionFailed(getClock(), GCCause.PROMOTION_FAILED, youngDuration);
+        MemoryPoolSummary youngGen = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(12);
+        MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(24);
+        MemoryPoolSummary totalHeap = this.getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 31);
         // This calculation is a best guess as the data is improperly recorded and details are lost
         youngCollection.add(youngGen,
                 new MemoryPoolSummary(tenured.getOccupancyBeforeCollection(), tenured.getOccupancyBeforeCollection(), tenured.getSizeAfterCollection()),
                 new MemoryPoolSummary(youngGen.getOccupancyBeforeCollection() + tenured.getOccupancyBeforeCollection(),
                         youngGen.getOccupancyAfterCollection() + tenured.getOccupancyBeforeCollection(),
                         youngGen.getSizeAfterCollection() + tenured.getSizeAfterCollection()));
+        publish(youngCollection);
 
         FullGC collection;
-        if (trace.getGroup(13) != null)
-            collection = new FullGC(new DateTimeStamp(trace.getGroup(13), trace.getDoubleGroup(14)), GCCause.PROMOTION_FAILED, trace.getDoubleGroup(trace.groupCount()));
-        else
-            collection = new FullGC(new DateTimeStamp(trace.getDoubleGroup(14)), GCCause.PROMOTION_FAILED, trace.getDoubleGroup(trace.groupCount()));
-
+        DateTimeStamp fullStart = trace.getDateTimeStamp(3);
+        double duration = trace.getDuration() - youngDuration;
+        collection = new FullGC(fullStart, GCCause.PROMOTION_FAILED, duration);
         collection.add(totalHeap.minus(tenured), tenured, totalHeap);
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     public void parNewPLAB(GCLogTrace trace, String line) {
@@ -747,18 +736,20 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     public void parNewPromotionFailedTimeAbortPreclean(GCLogTrace trace, String line) {
         garbageCollectionTypeForwardReference = GarbageCollectionTypes.ParNewPromotionFailed;
         gcCauseForwardReference = GCCause.PROMOTION_FAILED;
-        fullGCTimeStamp = getClock();
-        scavengeTimeStamp = trace.getDateTimeStamp(2);
-        youngMemoryPoolSummaryForwardReference = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(6);
-        scavengeDurationForwardReference = trace.getDoubleGroup(12);
+        scavengeDurationForwardReference = trace.getDoubleGroup((2 * TIME_DATE_OFFSET) + 6);
+        fullGCTimeStamp = getClock().add(scavengeDurationForwardReference);
+        scavengeTimeStamp = trace.getDateTimeStamp();
+        youngMemoryPoolSummaryForwardReference = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(2 * TIME_DATE_OFFSET);
     }
 
+    // todo: doesn't seem to be test coverage for this
     public void parNewPromotionFailedConcurrentPhase(GCLogTrace trace, String line) {
         scavengeTimeStamp = trace.getDateTimeStamp();
         garbageCollectionTypeForwardReference = GarbageCollectionTypes.ParNew;
         gcCauseForwardReference = trace.gcCause();
-        scavengeDurationForwardReference = trace.getDoubleGroup(12);
-        youngMemoryPoolSummaryForwardReference = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(6);
+        scavengeDurationForwardReference = trace.getDoubleGroup(18);
+        youngMemoryPoolSummaryForwardReference = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(12);
+        concurrentPhaseEnd(trace,line,19);
     }
 
     // ParNew with tenuring, no concurrent-mode-failure
@@ -769,12 +760,15 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         scavengeTimeStamp = trace.getDateTimeStamp();
         gcCauseForwardReference = trace.gcCause();
         garbageCollectionTypeForwardReference = GarbageCollectionTypes.ParNew;
+        concurrentPhaseEnd(trace,line,11);
     }
 
+    //(promotion failed): 118016K->118016K(118016K), 0.0288030 secs]17740.440: [CMS (concurrent mode failure): 914159K->311550K(917504K), 0.5495730 secs] 985384K->311550K(1035520K),
+    // [CMS Perm : 65977K->65950K(131072K)], 0.5785090 secs] [Times: user=0.67 sys=0.01, real=0.58 secs]
     public void corruptedParNewBody(GCLogTrace trace, String line) {
         ParNewPromotionFailed parNewPromotionFailed = new ParNewPromotionFailed(scavengeTimeStamp, GCCause.PROMOTION_FAILED, trace.getPauseTime() - trace.getDoubleGroup(16));
-        MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 17);
-        MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(10);
+        MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 20);
+        MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(13);
         MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1);
 
         MemoryPoolSummary parNewHeap = new MemoryPoolSummary(heap.getOccupancyBeforeCollection(), heap.getSizeAfterCollection(), heap.getOccupancyBeforeCollection(), heap.getSizeAfterCollection());
@@ -785,57 +779,75 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         concurrentModeFailure.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         concurrentModeFailure.add(extractCPUSummary(line));
 
-        record(parNewPromotionFailed);
-        record(concurrentModeFailure);
+        publish(parNewPromotionFailed);
+        publish(concurrentModeFailure);
     }
 
     public void concurrentPhaseStart(GCLogTrace trace, String line) {
-        //not interesting to this parser
+        startOfConcurrentPhase = trace.getDateTimeStamp();
+        inConcurrentPhase = true;
     }
 
     public void concurrentPhaseEnd(GCLogTrace trace, String line) {
-        //not interesting to this parser
+        concurrentPhaseEnd(trace, line, 0);
     }
 
-    public void abortPrecleanDueToTimeClause(GCLogTrace trace, String line) {
+    public void concurrentPhaseEnd(GCLogTrace trace, String line, int offset) {
+        try {
+            double cpuTime = trace.getDoubleGroup(7 + offset);
+            double wallClock = trace.getDoubleGroup(8 + offset);
+            switch (trace.getGroup(6 + offset)) {
+                case "mark":
+                    publish(new ConcurrentMark(startOfConcurrentPhase, wallClock, cpuTime, wallClock));
+                    break;
+                case "preclean" :
+                    publish(new ConcurrentPreClean(startOfConcurrentPhase, wallClock, cpuTime, wallClock));
+                    break;
+                case "abortable-preclean" :
+                    publish(new AbortablePreClean(startOfConcurrentPhase, wallClock, cpuTime, wallClock, cpuTime > 0.0d));
+                    break;
+                case "sweep" :
+                    publish(new ConcurrentSweep(startOfConcurrentPhase, wallClock, cpuTime, wallClock));
+                    break;
+                case "reset" :
+                    publish(new ConcurrentReset(startOfConcurrentPhase, wallClock, cpuTime, wallClock));
+                    break;
+                default:
+                    LOGGER.warning("concurrent phase not recognized end statement -> " + trace);
+            }
+        } catch (Exception e) {
+            LOGGER.warning("concurrent phase end throws " + e.getMessage() + " for " + trace);
+        }
     }
 
     //12.986: [GC[1 CMS-initial-mark: 33532K(62656K)] 49652K(81280K), 0.0014191 secs] [Times: user=0.00 sys=0.00, real=0.00 secs]
     //todo: Initial-mark rule maybe too greedy???
     public void initialMark(GCLogTrace trace, String line) {
         InitialMark initialMark = new InitialMark(getClock(), trace.gcCause(), trace.getDoubleGroup(trace.groupCount()));
-        initialMark.add(trace.getOccupancyWithMemoryPoolSizeSummary(4), getTotalOccupancyWithTotalHeapSizeSummary(trace, 8));
+        initialMark.add(trace.getOccupancyWithMemoryPoolSizeSummary(7), getTotalOccupancyWithTotalHeapSizeSummary(trace, 11));
         initialMark.add(extractCPUSummary(line));
-        record(initialMark);
+        publish(initialMark);
     }
 
     //2399564.221: [GC[YG occupancy: 143736 K (2052672 K)]2399564.221: [GC 2399564.222: [ParNew: 143736K->43849K(2052672K), 10.4702845 secs] 2214360K->2115172K(6193728K), 10.4716661 secs
     //4981160.497: [GC[YG occupancy: 77784 K (153344 K)]4981160.498: [Rescan (parallel) , 0.1474240 secs]2014-06-10T17:50:11.873-0700: 4981160.645: [weak refs processing, 0.0000430 secs]2014-06-10T17:50:11.873-0700: 4981160.645: [scrub string table, 0.0009790 secs] [1 CMS-remark: 1897500K(1926784K)] 1975285K(2080128K), 0.1486260 secs] [Times: user=0.29 sys=0.00, real=0.15 secs]
     public void scavengeBeforeRemark(GCLogTrace trace, String line) {
-        ParNew parNew = new ParNew(new DateTimeStamp(trace.getGroup(6), trace.getDoubleGroup(7)), trace.gcCause(), trace.getDoubleGroup(trace.groupCount()));
-        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(11);
-        MemoryPoolSummary tenured = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 18);
+        DateTimeStamp parNewStart = trace.getDateTimeStamp(2);
+        ParNew parNew = new ParNew(parNewStart, GCCause.UNKNOWN_GCCAUSE, trace.getDuration());
+        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(20);
+        MemoryPoolSummary tenured = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 27);
         parNew.add(young, tenured.minus(young), tenured);
         parNew.add(extractCPUSummary(line));
-        parNewForwardReference = parNew;
+        publish(parNew);
     }
 
     public void scavengeBeforeRemarkTenuring(GCLogTrace trace, String line) {
-        scavengeTimeStamp = new DateTimeStamp(trace.getGroup(6), trace.getDoubleGroup(7));
+        scavengeTimeStamp = trace.getDateTimeStamp(2);
         garbageCollectionTypeForwardReference = GarbageCollectionTypes.ParNew;
     }
 
-    //todo: collapse all of these methods with either a reparse or a location qualifier
-    public void remarkAt21(GCLogTrace trace, String line) {
-        recordRemark(trace, line, 21, trace.gcCause());
-    }
-
     public void parallelRemarkStringSymbolClause(GCLogTrace trace, String line) {
-        recordRemark(trace, line, 18, trace.gcCause());
-    }
-
-    public void remarkAt15(GCLogTrace trace, String line) {
-        recordRemark(trace, line, 15, trace.gcCause());
+        recordRemark(trace, line, trace.gcCause());
     }
 
     //todo: outstanding question.. is ParNew scavenge before remark pause time included in the remark pause time
@@ -846,36 +858,34 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
             collection = new CMSRemark(remarkTimeStamp, GCCause.CMS_FINAL_REMARK, trace.getDoubleGroup(trace.groupCount()));
             remarkTimeStamp = null;
         } else {
-            collection = new CMSRemark(getClock(), GCCause.CMS_FINAL_REMARK, trace.getDoubleGroup(trace.groupCount()));
+            collection = new CMSRemark(getClock(), GCCause.CMS_FINAL_REMARK, trace.getDuration());
         }
 
-        MemoryPoolSummary tenured = trace.getOccupancyWithMemoryPoolSizeSummary(10);
-        MemoryPoolSummary heap = getTotalOccupancyWithTotalHeapSizeSummary(trace, 14);
+        MemoryPoolSummary tenured = trace.getOccupancyWithMemoryPoolSizeSummary(19);
+        MemoryPoolSummary heap = getTotalOccupancyWithTotalHeapSizeSummary(trace, 23);
         collection.add(heap.minus(tenured), tenured, heap);
         recordRescanStepTimes(collection, line);
         collection.addReferenceGCSummary(extractPrintReferenceGC(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
         if (parNewForwardReference != null) {
-            record(parNewForwardReference);
+            publish(parNewForwardReference);
             parNewForwardReference = null;
         }
     }
 
-    public void remarkAt12(GCLogTrace trace, String line) {
-        recordRemark(trace, line, 12, trace.gcCause());
+    public void rescanWeakClassSymbolString(GCLogTrace trace, String line) {
+        CMSRemark remark = new CMSRemark(getClock(), GCCause.CMS_FINAL_REMARK, trace.getDuration());
+        MemoryPoolSummary tenured = new MemoryPoolSummary(trace.toKBytes(20), trace.toKBytes(22), trace.toKBytes(20), trace.toKBytes(22));
+        MemoryPoolSummary heap = new MemoryPoolSummary(trace.toKBytes(24), trace.toKBytes(26), trace.toKBytes(24), trace.toKBytes(26));
+        remark.add(youngMemoryPoolSummaryForwardReference, tenured, heap);
+        recordRescanStepTimes(remark, line);
+        remark.add(extractCPUSummary(line));
+        publish(remark);
     }
 
-    public void remarkAt11(GCLogTrace trace, String line) {
-        recordRemark(trace, line, 11, trace.gcCause(2));
-    }
-
-    public void remarkAt13(GCLogTrace trace, String line) {
-        recordRemark(trace, line, 13, trace.gcCause());
-    }
-
-    public void remarkAt1(GCLogTrace trace, String line) {
-        recordRemark(trace, line, 1, trace.gcCause());
+    public void recordRemark(GCLogTrace trace, String line) {
+        recordRemark(trace, line, trace.gcCause());
     }
 
     public void remarkParNewPromotionFailed(GCLogTrace trace, String line) {
@@ -884,7 +894,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         MemoryPoolSummary tenured = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 18);
         parNewPromotionFailed.add(young, tenured.minus(young), tenured);
         parNewPromotionFailed.add(extractCPUSummary(line));
-        record(parNewPromotionFailed);
+        publish(parNewPromotionFailed);
     }
 
     //: 17337K->347K(18624K), 0.0007142 secs] 23862K->6872K(81280K), 0.0008003 secs]
@@ -892,17 +902,17 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1);
         MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 8);
         if (garbageCollectionTypeForwardReference == GarbageCollectionTypes.ParNew) {
-            ParNew collection = new ParNew(scavengeTimeStamp, gcCauseForwardReference, trace.getDoubleGroup(14));
+            ParNew collection = new ParNew(scavengeTimeStamp, gcCauseForwardReference, trace.getDuration());
             collection.add(young, heap);
             collection.add(referenceGCForwardReference);
             collection.add(extractCPUSummary(line));
-            record(collection);
+            publish(collection);
         } else if (garbageCollectionTypeForwardReference == GarbageCollectionTypes.DefNew) {
             DefNew collection = new DefNew(scavengeTimeStamp, gcCauseForwardReference, trace.getDoubleGroup(14));
             collection.add(young, heap);
             collection.add(referenceGCForwardReference);
             collection.add(extractCPUSummary(line));
-            record(collection);
+            publish(collection);
         }
     }
 
@@ -919,7 +929,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
                     new MemoryPoolSummary(tenuredPoolSummary.getOccupancyBeforeCollection(), tenuredPoolSummary.getSizeBeforeCollection(), tenuredPoolSummary.getOccupancyBeforeCollection(), tenuredPoolSummary.getSizeAfterCollection()),
                     new MemoryPoolSummary(heapSummary.getOccupancyBeforeCollection(), heapSummary.getSizeBeforeCollection(), heapSummary.getOccupancyBeforeCollection(), heapSummary.getSizeAfterCollection()));
             collection.add(extractCPUSummary(line));
-            record(collection, false);
+            publish(collection, false);
             failure = new ConcurrentModeFailure(getClock(), gcCauseForwardReference, trace.getDoubleGroup(trace.groupCount()));
             youngMemoryPoolSummaryForwardReference = heapSummary.minus(tenuredPoolSummary);
         } else if (garbageCollectionTypeForwardReference == GarbageCollectionTypes.DefNew) {
@@ -928,7 +938,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
                     new MemoryPoolSummary(tenuredPoolSummary.getOccupancyBeforeCollection(), tenuredPoolSummary.getSizeBeforeCollection(), tenuredPoolSummary.getOccupancyBeforeCollection(), tenuredPoolSummary.getSizeAfterCollection()),
                     new MemoryPoolSummary(heapSummary.getOccupancyBeforeCollection(), heapSummary.getSizeBeforeCollection(), heapSummary.getOccupancyBeforeCollection(), heapSummary.getSizeAfterCollection()));
             collection.add(extractCPUSummary(line));
-            record(collection, false);
+            publish(collection, false);
             failure = new ConcurrentModeFailure(getClock(), gcCauseForwardReference, trace.getDoubleGroup(trace.groupCount()));
             youngMemoryPoolSummaryForwardReference = heapSummary.minus(tenuredPoolSummary);
         } else if (garbageCollectionTypeForwardReference == GarbageCollectionTypes.ParNewPromotionFailed) {
@@ -937,7 +947,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
                     new MemoryPoolSummary(tenuredPoolSummary.getOccupancyBeforeCollection(), tenuredPoolSummary.getSizeBeforeCollection(), tenuredPoolSummary.getOccupancyBeforeCollection(), tenuredPoolSummary.getSizeAfterCollection()),
                     new MemoryPoolSummary(heapSummary.getOccupancyBeforeCollection(), heapSummary.getSizeBeforeCollection(), heapSummary.getOccupancyBeforeCollection(), heapSummary.getSizeAfterCollection()));
             collection.add(extractCPUSummary(line));
-            record(collection, false);
+            publish(collection, false);
             failure = new ConcurrentModeFailure(getClock(), gcCauseForwardReference, trace.getDoubleGroup(trace.groupCount()));
             youngMemoryPoolSummaryForwardReference = heapSummary.minus(tenuredPoolSummary);
         } else if ((garbageCollectionTypeForwardReference == GarbageCollectionTypes.ConcurrentModeFailure) ||
@@ -950,33 +960,54 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
             if (youngMemoryPoolSummaryForwardReference == null)
                 youngMemoryPoolSummaryForwardReference = heapSummary.minus(tenuredPoolSummary);
         } else {
-            trace.notYetImplemented();
+            LOGGER.warning("Unable to parse -> " + trace);
             return;
         }
 
         failure.add(youngMemoryPoolSummaryForwardReference, tenuredPoolSummary, heapSummary);
         failure.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         failure.add(extractCPUSummary(line));
-        record(failure);
+        publish(failure);
     }
 
     //: 196768K->18097K(471872K), 0.1321291 secs]198764.460: [CMS (concurrent mode failure): 473195K->376198K(1048576K), 25.1817732 secs] 668966K->376198K(1520448K), [CMS Perm : 131008K->27169K(131072K)], 25.3146647 secs]
     //: 439257K->439257K(471872K), 0.5857972 secs]898606.202: [CMS (concurrent mode failure): 1040282K->1048575K(1048576K), 28.6064288 secs] 1478173K->1055740K(1520448K), 29.1931179 secs]
     //: 189422K->15827K(471872K), 0.1282129 secs]131348.814: [CMS (concurrent mode failure): 927657K->279012K(1572864K), 23.8067389 secs] 1116483K->279012K(2044736K), [CMS Perm : 131071K->27250K(131072K)], 23.9363976 secs]
     //this one is tricky, the GC is caused by CMS Perm filling up. Take heap before GC as heap after GC for the ParNew
+
+    /**
+     * Internal memory pools have to be derived for the ParNew.
+     * The following calculations were used to derive all pool sizes for the log entry below
+     * : 189422K->15827K(471872K), 0.1282129 secs]131348.814: [CMS (concurrent mode failure): 927657K->279012K(1572864K), 23.8067389 secs] 1116483K->279012K(2044736K), [CMS Perm : 131071K->27250K(131072K)], 23.9363976 secs]
+     * total heap for young = 189422K + 927657K -> 1116483K (2044736K), @ indexes   1 + 13 -> 20 (24)
+     * total heap for CMF =   1116483K->279012K(2044736K)                               20 -> 22 (24)
+     * tenured for CMF =      927657K->279012K(1572864K)                                13 -> 15 (17)
+     * young for CMF = 15827K -> 0K (471872K)                                            3 -> 0K (5)
+     * @param trace representing the log line
+     * @param line the text for the log line (can be extracted from the trace using trace.group(0);
+     *
+     */
     public void parNewDetailsConcurrentModeFailure(GCLogTrace trace, String line) {
         ParNew parNew = new ParNew(scavengeTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(7));
-        MemoryPoolSummary summary = new MemoryPoolSummary(trace.getMemoryInKBytes(24), trace.getMemoryInKBytes(28), trace.getMemoryInKBytes(24), trace.getMemoryInKBytes(28));
-        parNew.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1), summary);
+        MemoryPoolSummary heap = new MemoryPoolSummary(trace.toKBytes(1) + trace.toKBytes(13), trace.toKBytes(24), trace.toKBytes(20), trace.toKBytes(24));
+        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1);
+        parNew.add(young, heap);
         parNew.add(extractCPUSummary(line));
-        record(parNew, false);
-        ConcurrentModeFailure collection = new ConcurrentModeFailure(fullGCTimeStamp, gcCauseForwardReference, trace.getDoubleGroup(trace.groupCount()));
+        publish(parNew, false);
+        if ( inConcurrentPhase) {
+            // todo: publish closing out concurrent phase
+            LOGGER.warning("concurrent phase not closed");
+        }
+
+        ConcurrentModeFailure collection = new ConcurrentModeFailure(fullGCTimeStamp, gcCauseForwardReference, trace.getDuration());
         collection.add(
-                new MemoryPoolSummary(trace.getMemoryInKBytes(3), trace.getMemoryInKBytes(5), 0L, trace.getMemoryInKBytes(28) - trace.getMemoryInKBytes(21)),
-                trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(17), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 24));
+                new MemoryPoolSummary(
+                        trace.toKBytes(3), trace.toKBytes(5), 0L, trace.toKBytes(5)),
+                        trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(13),
+                        trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(20));
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     /*
@@ -989,6 +1020,9 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     public void parNewDetailsPromotionFailedWithConcurrentMarkSweepPhase(GCLogTrace trace, String line) {
         youngMemoryPoolSummaryForwardReference = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1);
         scavengeDurationForwardReference = trace.getDoubleGroup(7);
+        GCLogTrace concurrentPhase = CONCURRENT_PHASE_END_BLOCK.parse(line);
+        if (concurrentPhase != null)
+            endOfConcurrentPhase(concurrentPhase,line);
     }
 
     //: 1069879K->1069879K(1090560K), 0.3135220 secs]2014-09-19T06:07:23.135+0200: 73512.294: [CMS: 1613084K->823344K(2423488K), 3.5186340 secs] 2639961K->823344K(3514048K), [CMS Perm : 205976K->205949K(343356K)], 3.8323790 secs] [Times: user=4.44 sys=0.00, real=3.83 secs]
@@ -997,20 +1031,20 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     public void parNewDetailsWithConcurrentModeFailure(GCLogTrace trace, String line) {
         ParNewPromotionFailed collection = new ParNewPromotionFailed(scavengeTimeStamp, gcCauseForwardReference, trace.getDoubleGroup(7));
         MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1);
-        MemoryPoolSummary heap = new MemoryPoolSummary(trace.getMemoryInKBytes(17), trace.getMemoryInKBytes(21), trace.getMemoryInKBytes(17), trace.getMemoryInKBytes(21));
+        MemoryPoolSummary heap = new MemoryPoolSummary(trace.toKBytes(20), trace.toKBytes(24), trace.toKBytes(20), trace.toKBytes(24));
         MemoryPoolSummary tenured = heap.minus(young);
         collection.add(young, tenured, heap);
         collection.add(extractCPUSummary(line));
-        record(collection, false);
+        publish(collection, false);
 
         ConcurrentModeFailure fullCollection = new ConcurrentModeFailure(getClock(), gcCauseForwardReference, trace.getDoubleGroup(trace.groupCount()));
-        tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(10);
-        heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 17);
+        tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(13);
+        heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 20);
         young = heap.minus(tenured);
         fullCollection.add(young, tenured, heap);
         fullCollection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         fullCollection.add(extractCPUSummary(line));
-        record(fullCollection);
+        publish(fullCollection);
     }
 
     //concerned about this rule as the occupancy here is at 26 but I have a test at 31 and
@@ -1025,7 +1059,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
             MemoryPoolSummary parNewHeap = new MemoryPoolSummary(heap.getOccupancyBeforeCollection(), heap.getSizeAfterCollection(), heap.getOccupancyBeforeCollection(), heap.getSizeAfterCollection());
             MemoryPoolSummary parNewTenured = parNewHeap.minus(youngMemoryPoolSummaryForwardReference);
             parNewForwardReference.add(youngMemoryPoolSummaryForwardReference, parNewTenured, parNewHeap);
-            record(parNewForwardReference, false);
+            publish(parNewForwardReference, false);
             collection = new ConcurrentModeFailure(fullGCTimeStamp, GCCause.CMS_FAILURE, trace.getDoubleGroup(trace.groupCount()));
         } else {
             collection = new FullGC(fullGCTimeStamp, GCCause.CMS_FAILURE, trace.getDoubleGroup(trace.groupCount()));
@@ -1034,7 +1068,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractPrintReferenceGC(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
 
@@ -1049,7 +1083,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
             collection.recordDutyCycle(dutyCycle);
             collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
             collection.add(extractCPUSummary(line));
-            record(collection);
+            publish(collection);
         }
 
         /*
@@ -1063,13 +1097,13 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
             collection.add(young, heap.minus(young), heap);
             collection.recordDutyCycle(dutyCycle);
             collection.add(extractCPUSummary(line));
-            record(collection);
+            publish(collection);
         } else if (garbageCollectionTypeForwardReference == GarbageCollectionTypes.ParNewPromotionFailed) {
             ParNewPromotionFailed collection = new ParNewPromotionFailed(scavengeTimeStamp, GCCause.PROMOTION_FAILED, trace.getDoubleGroup(trace.groupCount()));
             collection.add(young, heap.minus(young), heap);
             collection.recordDutyCycle(dutyCycle);
             collection.add(extractCPUSummary(line));
-            record(collection);
+            publish(collection);
         } else
             LOGGER.log(Level.WARNING, "@" + scavengeTimeStamp + ". ParNew details not preceded by a ParNew: " + garbageCollectionTypeForwardReference);
     }
@@ -1078,11 +1112,11 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     //(concurrent mode failure): 1696350K->613432K(2015232K), 22.0030939 secs] 1772267K->613432K(2097088K) icms_dc=100 , 22.3467890 secs]
     public void iCMSConcurrentModeFailure(GCLogTrace trace, String line) {
         if (garbageCollectionTypeForwardReference == GarbageCollectionTypes.FullGC || garbageCollectionTypeForwardReference == GarbageCollectionTypes.ConcurrentModeFailure) {
-            ConcurrentModeFailure failure = new ConcurrentModeFailure(fullGCTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(trace.groupCount()));
+            ConcurrentModeFailure failure = new ConcurrentModeFailure(fullGCTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getDuration());
             failure.add(getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 8));
             failure.recordDutyCycle(trace.getIntegerGroup(21));
             failure.add(extractCPUSummary(line));
-            record(failure);
+            publish(failure);
         } else if ((garbageCollectionTypeForwardReference == GarbageCollectionTypes.ParNew) || (garbageCollectionTypeForwardReference == GarbageCollectionTypes.ParNewPromotionFailed)) {
             ParNew collection;
             if (garbageCollectionTypeForwardReference == GarbageCollectionTypes.ParNew)
@@ -1092,7 +1126,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
 
             collection.add(youngMemoryPoolSummaryForwardReference, new MemoryPoolSummary(trace.getLongGroup(8), trace.getLongGroup(12), trace.getLongGroup(8), trace.getLongGroup(12)));
             collection.add(extractCPUSummary(line));
-            record(collection, false);
+            publish(collection, false);
             if (fullGCTimeStamp == null) {
                 fullGCTimeStamp = scavengeTimeStamp.add(trace.getDoubleGroup(7));
             }
@@ -1102,9 +1136,9 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
             failure.add(heap.minus(tenured), tenured, heap);
             failure.recordDutyCycle(trace.getIntegerGroup(21));
             failure.add(extractCPUSummary(line));
-            record(failure);
+            publish(failure);
         } else {
-            trace.notYetImplemented();
+            LOGGER.warning("Unable to parse -> " + trace);
         }
     }
 
@@ -1118,20 +1152,20 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         {
             ParNewPromotionFailed collection = new ParNewPromotionFailed(scavengeTimeStamp, trace.getDoubleGroup(7));
             MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1);
-            MemoryPoolSummary heap = new MemoryPoolSummary(trace.getMemoryInKBytes(17), trace.getMemoryInKBytes(21), trace.getMemoryInKBytes(17), trace.getMemoryInKBytes(21));
+            MemoryPoolSummary heap = new MemoryPoolSummary(trace.toKBytes(20), trace.toKBytes(24), trace.toKBytes(20), trace.toKBytes(24));
             collection.add(young, heap.minus(young), heap);
             collection.add(extractCPUSummary(line));
-            record(collection);
+            publish(collection);
         }
 
         {
-            ConcurrentModeFailure collection = new ConcurrentModeFailure(getClock(), GCCause.CMS_FAILURE, trace.getDoubleGroup(trace.groupCount()));
-            MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(10);
-            MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 17);
+            ConcurrentModeFailure collection = new ConcurrentModeFailure(getClock(), GCCause.CMS_FAILURE, trace.getDuration());
+            MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(13);
+            MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 20);
             collection.add(heap.minus(tenured), tenured, heap);
-            collection.recordDutyCycle(trace.getIntegerGroup(23));
+            collection.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 1));
             collection.add(extractCPUSummary(line));
-            record(collection);
+            publish(collection);
         }
     }
 
@@ -1140,6 +1174,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         fullGCTimeStamp = getClock();
         garbageCollectionTypeForwardReference = GarbageCollectionTypes.FullGC;
         gcCauseForwardReference = trace.gcCause();
+        endOfConcurrentPhase(trace,trace.getDateTimeStamp(3), 11);
     }
 
     public void fullGCReferenceConcurrentModeFailure(GCLogTrace trace, String line) {
@@ -1152,7 +1187,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         collection.addReferenceGCSummary(extractPrintReferenceGC(line));
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     //12525.344: [Full GC 12525.344: [ParNew
@@ -1164,55 +1199,56 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     }
 
     public void iCMSParNew(GCLogTrace trace, String line) {
-        ParNew parNew = new ParNew(getClock(), trace.gcCause(), trace.getDoubleGroup(trace.groupCount()));
-        parNew.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(6), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 13));
+        int offset = TIME_DATE_OFFSET * 2;
+        ParNew parNew = new ParNew(getClock(), trace.gcCause(), trace.getDuration());
+        parNew.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(offset), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, offset + 7));
         parNew.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 1));
         parNew.add(extractCPUSummary(line));
-        record(parNew);
+        publish(parNew);
     }
 
     //Full GC with ParNew promotion failed.
     //"445909.040: [GC 445909.040: [ParNew (1: promotion failure size = 4629668)  (promotion failed): 460096K->460096K(460096K), 0.8467130 secs]445909.887: [CMS: 6252252K->2709964K(7877440K), 23.9213270 secs] 6637399K->2709964K(8337536K), [CMS Perm : 1201406K->68157K(2097152K)] icms_dc=0 , 24.7685320 secs]
     public void iCMSParNewPromotionFailureRecord(GCLogTrace trace, String line) {
-        ParNewPromotionFailed parNewPromotionFailed = new ParNewPromotionFailed(getClock(), GCCause.PROMOTION_FAILED, trace.getDoubleGroup(13));
-        MemoryPoolSummary heap = new MemoryPoolSummary(trace.getMemoryInKBytes(23), trace.getMemoryInKBytes(27), trace.getMemoryInKBytes(23), trace.getMemoryInKBytes(27));
-        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(7);
+        ParNewPromotionFailed parNewPromotionFailed = new ParNewPromotionFailed(getClock(), GCCause.PROMOTION_FAILED, trace.getDoubleGroup(19));
+        MemoryPoolSummary heap = new MemoryPoolSummary(trace.toKBytes(32), trace.toKBytes(36), trace.toKBytes(32), trace.toKBytes(36));
+        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(13);
         MemoryPoolSummary tenured = heap.minus(young);
         parNewPromotionFailed.add(young, tenured, heap);
-        parNewPromotionFailed.recordDutyCycle(trace.getIntegerGroup(36));
-        record(parNewPromotionFailed);
+        parNewPromotionFailed.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 2));
+        publish(parNewPromotionFailed);
         //Synthesis a Full GC
         DateTimeStamp fullGCStart = trace.getDateTimeStamp(3);
         fullGCStart = getClock().add(fullGCStart.getTimeStamp() - getClock().getTimeStamp());
-        FullGC fullGC = new FullGC(fullGCStart, GCCause.PROMOTION_FAILED, trace.getDoubleGroup(22));
-        heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 23);
-        tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(16);
-        young = new MemoryPoolSummary(0L, trace.getMemoryInKBytes(11), 0L, trace.getMemoryInKBytes(11));
+        FullGC fullGC = new FullGC(fullGCStart, GCCause.PROMOTION_FAILED, trace.getDoubleGroup(31));
+        heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 32);
+        tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(25);
+        young = new MemoryPoolSummary(0L, trace.toKBytes(17), 0L, trace.toKBytes(17));
         fullGC.add(young, tenured, heap);
         fullGC.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
-        fullGC.recordDutyCycle(trace.getIntegerGroup(36));
-        record(fullGC);
+        fullGC.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 2));
+        publish(fullGC);
     }
 
     public void iCMSParNewPromotionFailure(GCLogTrace trace, String line) {
-        ParNewPromotionFailed parNewPromotionFailed = new ParNewPromotionFailed(getClock(), GCCause.PROMOTION_FAILED, trace.getDoubleGroup(12));
-        MemoryPoolSummary heap = new MemoryPoolSummary(trace.getMemoryInKBytes(22), trace.getMemoryInKBytes(26), trace.getMemoryInKBytes(22), trace.getMemoryInKBytes(26));
-        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(6);
+        double parnewDuration = trace.getDoubleGroup((2 * TIME_DATE_OFFSET) + 6);
+        ParNewPromotionFailed parNewPromotionFailed = new ParNewPromotionFailed(getClock(), GCCause.PROMOTION_FAILED, parnewDuration);
+        MemoryPoolSummary heap = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary((3 * TIME_DATE_OFFSET) + 13);
+        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(2 * TIME_DATE_OFFSET);
         MemoryPoolSummary tenured = heap.minus(young);
-        parNewPromotionFailed.add(young, tenured, heap);
-        parNewPromotionFailed.recordDutyCycle(trace.getIntegerGroup(35));
-        record(parNewPromotionFailed);
+        parNewPromotionFailed.add(young, tenured, new MemoryPoolSummary(heap.getOccupancyBeforeCollection(),heap.getSizeBeforeCollection(),heap.getOccupancyBeforeCollection(),heap.getSizeBeforeCollection()));
+        parNewPromotionFailed.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 1));
+        publish(parNewPromotionFailed);
 
         //Synthesis a Full GC
         DateTimeStamp fullGCStart = trace.getDateTimeStamp(3);
-        ConcurrentModeFailure fullGC = new ConcurrentModeFailure(fullGCStart, GCCause.PROMOTION_FAILED, trace.getDoubleGroup(trace.groupCount() - 1));
-        heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 22);
-        tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(15);
-        young = new MemoryPoolSummary(0L, trace.getMemoryInKBytes(10), 0L, trace.getMemoryInKBytes(10));
+        ConcurrentModeFailure fullGC = new ConcurrentModeFailure(fullGCStart, GCCause.PROMOTION_FAILED, trace.getDuration() - parnewDuration);
+        tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary((3 * TIME_DATE_OFFSET) + 6);
+        young = new MemoryPoolSummary(young.getOccupancyBeforeCollection(), young.getSizeBeforeCollection(), 0L, young.getSizeAfterCollection());
         fullGC.add(young, tenured, heap);
         fullGC.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
-        fullGC.recordDutyCycle(trace.getIntegerGroup(35));
-        record(fullGC);
+        fullGC.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 1));
+        publish(fullGC);
     }
 
     //85.577: [Full GC 85.577: [CMS: 5K->1883K(1926784K), 9.8521080 secs] 20369K->1883K(2080128K), [CMS Perm : 13770K->13604K(22970K)] icms_dc=100 , 9.8522900 secs]
@@ -1220,40 +1256,40 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     public void fullGCiCMS(GCLogTrace trace, String line) {
         FullGC collection;
         if (trace.gcCause() == GCCause.JAVA_LANG_SYSTEM)
-            collection = new SystemGC(getClock(), trace.gcCause(), trace.getDoubleGroup(trace.groupCount()));
+            collection = new SystemGC(getClock(), trace.gcCause(), trace.getDuration());
         else
-            collection = new FullGC(getClock(), trace.gcCause(), trace.getDoubleGroup(trace.groupCount()));
-        MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(5);
-        MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 12);
+            collection = new FullGC(getClock(), trace.gcCause(), trace.getDuration());
+        MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(2 + TIME_DATE_OFFSET);
+        MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, (TIME_DATE_OFFSET) + 9);
         collection.add(heap.minus(tenured), tenured, heap);
-        collection.recordDutyCycle(trace.getIntegerGroup(25));
+        collection.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 1));
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     //: 81792K->0K(81856K), 0.0431036 secs] 90187K->11671K(2097088K) icms_dc=5 , 0.0435503 secs]
     public void iCMSParNewDefNewTenuringDetails(GCLogTrace trace, String line) {
         if (GarbageCollectionTypes.ParNew == garbageCollectionTypeForwardReference) {
-            ParNew collection = new ParNew(scavengeTimeStamp, gcCauseForwardReference, trace.getDoubleGroup(trace.groupCount()));
+            ParNew collection = new ParNew(scavengeTimeStamp, gcCauseForwardReference, trace.getDuration());
             collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 8));
             collection.recordDutyCycle(trace.getIntegerGroup(14));
             collection.add(extractCPUSummary(line));
-            record(collection);
+            publish(collection);
         } else if (GarbageCollectionTypes.ParNewPromotionFailed == garbageCollectionTypeForwardReference) {
-            ParNewPromotionFailed collection = new ParNewPromotionFailed(scavengeTimeStamp, gcCauseForwardReference, trace.getDoubleGroup(trace.groupCount()));
+            ParNewPromotionFailed collection = new ParNewPromotionFailed(scavengeTimeStamp, gcCauseForwardReference, trace.getDuration());
             MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1);
             MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 8);
             collection.add(young, heap.minus(young), heap);
             collection.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 1));
-            record(collection);
+            publish(collection);
         } else if (GarbageCollectionTypes.FullGC == garbageCollectionTypeForwardReference) {
-            FullGC collection = new FullGC(fullGCTimeStamp, gcCauseForwardReference, trace.getDoubleGroup(trace.groupCount()));
+            FullGC collection = new FullGC(fullGCTimeStamp, gcCauseForwardReference, trace.getDuration());
             MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1);
             MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 8);
             collection.add(young, heap.minus(young), heap);
             collection.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 1));
-            record(collection);
+            publish(collection);
         } else {
             LOGGER.warning("Not reported: " + line);
         }
@@ -1263,12 +1299,12 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
 
     //35305.590: [GC 35305.590: [ParNew (promotion failed): 10973K->3147K(153344K), 0.0295730 secs] 1763339K->1763817K(2080128K) icms_dc=32 , 0.0297680 secs]
     public void iCMSPromotionFailed(GCLogTrace trace, String line) {
-        ParNewPromotionFailed collection = new ParNewPromotionFailed(getClock(), trace.getDoubleGroup(trace.groupCount()));
-        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(5);
-        MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 12);
+        ParNewPromotionFailed collection = new ParNewPromotionFailed(getClock(), trace.getDuration());
+        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(TIME_DATE_OFFSET + 2);
+        MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, TIME_DATE_OFFSET + 9);
         collection.add(young, heap.minus(young), heap);
-        collection.recordDutyCycle(trace.getIntegerGroup(18));
-        record(collection);
+        collection.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 1));
+        publish(collection);
     }
 
     //2015-08-06T16:26:47.553+0200: 3913.750: [Full GC (System) 2015-08-06T16:26:47.553+0200: 3913.751: [CMS: 1637962K->788069K(2359296K), 5.9688430 secs] 1680897K->788069K(3122624K), [CMS Perm : 147747K->147352K(200188K)] icms_dc=0 , 5.9729544 secs]
@@ -1276,80 +1312,50 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         FullGC collection;
         GCCause cause = trace.gcCause();
         if (cause == GCCause.JAVA_LANG_SYSTEM)
-            collection = new SystemGC(getClock(), trace.getDoubleGroup(trace.groupCount()));
+            collection = new SystemGC(getClock(), trace.getDuration());
         else if ((cause == GCCause.UNKNOWN_GCCAUSE) || (cause == GCCause.GCCAUSE_NOT_SET)) {
-            collection = new FullGC(getClock(), cause, trace.getDoubleGroup(trace.groupCount()));
+            collection = new FullGC(getClock(), cause, trace.getDuration());
         } else {
-            trace.notYetImplemented();
+            LOGGER.warning("Unable to parse -> " + trace);
             return;
         }
 
-        MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(6);
-        MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 13);
+        MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(12);
+        MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 19);
         collection.add(heap.minus(tenured), tenured, heap);
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 1));
-        record(collection);
-    }
-
-
-    //72825.712: [GC72825.712: [ParNew (promotion failed): 153344K->153344K(153344K), 0.3895590 secs]72826.102: [CMS: 1831960K->1554399K(1926784K), 8.3796720 secs] 1914705K->1554399K(2080128K), [CMS Perm : 131704K->130876K(222768K)] icms_dc=42 , 8.7694530 secs]
-    //1207,770: [GC 1207,770: [ParNew: 629120K->629120K(629120K), 0,0000240 secs]1207,770: [CMS: 1270289K->696493K(1398144K), 4,3217660 secs] 1899409K->696493K(2027264K), [CMS Perm : 216443K->214985K(360736K)] icms_dc=24 , 4,3221610 secs] [Times: user=4,31 sys=0,01, real=4,32 secs]
-    /*
-       2013-01-25T10:12:13.318+0100: 1207,770: [GC 1207,770: [ParNew: 629120K->629120K(629120K), 0,0000240 secs]1207,770: [CMS: 1270289K->696493K(1398144K), 4,3217660 secs] 1899409K->696493K(2027264K), [CMS Perm : 216443K->214985K(360736K)] icms_dc=24 , 4,3221610 secs] [Times: user=4,31 sys=0,01, real=4,32 secs]
-       ParNew promotion failed outside of concurrent cycle
-     */
-    public void iCMSPromotionFailedPermMeta(GCLogTrace trace, String line) {
-        double gcDuration = trace.getDoubleGroup(20);
-        double parNewDuration = trace.getDoubleGroup(11);
-        ParNewPromotionFailed parNew = new ParNewPromotionFailed(trace.getDateTimeStamp(), GCCause.UNKNOWN_GCCAUSE, parNewDuration);
-        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(5);
-        MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(14);
-        MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 21);
-        parNew.add(young,
-                new MemoryPoolSummary(tenured.getOccupancyBeforeCollection(), tenured.getSizeAfterCollection(), tenured.getOccupancyBeforeCollection(), tenured.getSizeAfterCollection()),
-                new MemoryPoolSummary(heap.getOccupancyBeforeCollection(), heap.getSizeAfterCollection(), heap.getOccupancyBeforeCollection(), heap.getSizeAfterCollection()));
-        parNew.add(extractCPUSummary(line));
-        record(parNew);
-
-        FullGC full = new FullGC(trace.getDateTimeStamp(3), GCCause.PROMOTION_FAILED, gcDuration);
-        full.add(heap.minus(tenured), tenured, heap);
-        full.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 1));
-        full.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
-        full.add(extractCPUSummary(line));
-        record(full);
+        publish(collection);
     }
 
     //91057.643: [GC 91057.643: [ParNew: 153344K->153344K(153344K), 0.0000250 secs]91057.643: [CMS: 1895319K->1754894K(1926784K), 9.6910090 secs] 2048663K->1754894K(2080128K), [CMS Perm : 135228K->134975K(230652K)] icms_dc=65 , 9.6912470 secs]
     public void iCMSMislabeledFull(GCLogTrace trace, String line) {
-        double gcDuration = trace.getDoubleGroup(trace.groupCount());
-        double parNewDuration = trace.getDoubleGroup(12);
+        double parNewDuration = trace.getDoubleGroup((TIME_DATE_OFFSET * 2) + 6);
         ParNew parNew = new ParNew(trace.getDateTimeStamp(2), trace.gcCause(), parNewDuration);
-        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(6);
-        MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(15);
-        MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 22);
+        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(TIME_DATE_OFFSET * 2);
+        MemoryPoolSummary tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary((TIME_DATE_OFFSET * 2) + 12);
+        MemoryPoolSummary heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, (TIME_DATE_OFFSET * 2) + 19);
         parNew.add(young,
                 new MemoryPoolSummary(tenured.getOccupancyBeforeCollection(), tenured.getSizeAfterCollection(), tenured.getOccupancyBeforeCollection(), tenured.getSizeAfterCollection()),
                 new MemoryPoolSummary(heap.getOccupancyBeforeCollection(), heap.getSizeAfterCollection(), heap.getOccupancyBeforeCollection(), heap.getSizeAfterCollection()));
-        parNew.add(young, tenured, heap);
-        record(parNew);
+        publish(parNew);
 
-        FullGC full = new FullGC(trace.getDateTimeStamp(3), trace.gcCause(), gcDuration);
+        FullGC full = new FullGC(trace.getDateTimeStamp(3), trace.gcCause(), trace.getDuration());
         full.add(heap.minus(tenured), tenured, heap);
         full.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 1));
         full.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         full.add(extractCPUSummary(line));
-        record(full);
+        publish(full);
     }
 
     //10110.232: [Full GC 10110.232: [CMS (concurrent mode failure): 2715839K->1659203K(2752512K), 39.3188254 secs] 2740830K->1659203K(3106432K), [CMS Perm : 206079K->204904K(402264K)] icms_dc=100 , 39.3199631 secs] [Times: user=39.37 sys=0.02, real=39.32 secs]
     public void iCMSFullAfterConcurrentModeFailure(GCLogTrace trace, String line) {
-        ConcurrentModeFailure failure = new ConcurrentModeFailure(getClock(), GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(trace.groupCount()));
-        failure.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(6), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 13));
-        failure.recordDutyCycle(trace.getIntegerGroup(26));
+        ConcurrentModeFailure failure = new ConcurrentModeFailure(getClock(), GCCause.UNKNOWN_GCCAUSE, trace.getDuration());
+        failure.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(TIME_DATE_OFFSET * 2), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, (TIME_DATE_OFFSET * 2) + 7));
+        failure.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 1));
         failure.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         failure.add(extractCPUSummary(line));
-        record(failure);
+        publish(failure);
     }
 
     //2015-07-26T00:18:34.603+0200: 86048.777: [Full GC (System) 86048.777: [CMS2015-07-26T00:18:35.590+0200: 86049.763: [CMS-concurrent-mark: 0.982/41377.748 secs] [Times: user=4426.99 sys=2507.75, real=41377.75 secs]
@@ -1366,7 +1372,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         collection.recordDutyCycle(trace.getIntegerGroup(trace.groupCount() - 1));
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     //42384.024: [Full GC [PSYoungGen: 1696K->0K(70464K)] [PSFull: 928442K->125867K(932096K)] 930139K->125867K(1002560K) [PSPermGen: 37030K->37030K(65536K)], 117.0312620 secs]
@@ -1374,14 +1380,14 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         GCCause cause = trace.gcCause();
         FullGC collection;
         if (cause == GCCause.JAVA_LANG_SYSTEM || cause == GCCause.HEAP_DUMP) {
-            collection = new SystemGC(getClock(), cause, trace.getDoubleGroup(trace.groupCount()));
+            collection = new SystemGC(getClock(), cause, trace.getDuration());
         } else {
-            collection = new PSFullGC(getClock(), cause, trace.getDoubleGroup(trace.groupCount()));
+            collection = new PSFullGC(getClock(), cause, trace.getDuration());
         }
-        collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(5), trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(11), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 17));
+        collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(TIME_DATE_OFFSET + 2), trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(TIME_DATE_OFFSET + 8), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, TIME_DATE_OFFSET + 14));
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     //1.147: [Full GC (System) 1.147: [Tenured: 1636K->1765K(5312K), 0.0488106 secs] 2894K->1765K(7616K), [Perm : 10112K->10112K(21248K)], 0.0488934 secs]
@@ -1392,54 +1398,29 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         collection.add(heap.minus(tenured), tenured, heap);
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     public void parNewConcurrentModeFailurePerm(GCLogTrace trace, String line) {
-
-        double totalPause = trace.getPauseTime();
-        double concurrentModeFailurePause = trace.getDoubleGroup(20);
+        double concurrentModeFailurePause = trace.getDoubleGroup(26);
+        double parNewPause = trace.getDoubleGroup(18);
         double startTimeGap = trace.getDoubleGroup(13) - getClock().getTimeStamp();
 
-        ParNewPromotionFailed parNewPromotionFailed = new ParNewPromotionFailed(getClock(), trace.gcCause(), totalPause - concurrentModeFailurePause);
-        MemoryPoolSummary heap = new MemoryPoolSummary(trace.getMemoryInKBytes(21), trace.getMemoryInKBytes(25), trace.getMemoryInKBytes(21), trace.getMemoryInKBytes(25));
-        MemoryPoolSummary tenured = new MemoryPoolSummary(trace.getMemoryInKBytes(14), trace.getMemoryInKBytes(18), trace.getMemoryInKBytes(14), trace.getMemoryInKBytes(18));
-        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(6);
-        parNewPromotionFailed.add(young, tenured, heap);
-        record(parNewPromotionFailed);
+        ParNewPromotionFailed parNewPromotionFailed = new ParNewPromotionFailed(getClock(), trace.gcCause(), parNewPause);
+        MemoryPoolSummary heap = new MemoryPoolSummary(trace.toKBytes(27), trace.toKBytes(31), trace.toKBytes(27), trace.toKBytes(31));
+        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(12);
+
+        parNewPromotionFailed.add(young, heap.minus(young), heap);
+        publish(parNewPromotionFailed);
 
         ConcurrentModeFailure concurrentModeFailure = new ConcurrentModeFailure(getClock().add(startTimeGap), GCCause.PROMOTION_FAILED, concurrentModeFailurePause);
 
-        heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 21);
-        tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(14);
-        concurrentModeFailure.add(heap.minus(tenured), tenured, heap);
+        heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 27);
+        young = new MemoryPoolSummary( trace.toKBytes(14), trace.toKBytes(16), 0, trace.toKBytes(16));
+        concurrentModeFailure.add(young, heap.minus(young), heap);
         concurrentModeFailure.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         concurrentModeFailure.add(extractCPUSummary(line));
-        record(concurrentModeFailure);
-
-    }
-
-    public void parNewConcurrentModeFailureMeta(GCLogTrace trace, String line) {
-
-        double totalPause = trace.getPauseTime();
-        double concurrentModeFailurePause = trace.getDoubleGroup(19);
-        double startTimeGap = trace.getDoubleGroup(12) - getClock().getTimeStamp();
-
-        ParNewPromotionFailed parNewPromotionFailed = new ParNewPromotionFailed(getClock(), trace.gcCause(), totalPause - concurrentModeFailurePause);
-        MemoryPoolSummary heap = new MemoryPoolSummary(trace.getMemoryInKBytes(20), trace.getMemoryInKBytes(24), trace.getMemoryInKBytes(20), trace.getMemoryInKBytes(24));
-        MemoryPoolSummary tenured = new MemoryPoolSummary(trace.getMemoryInKBytes(13), trace.getMemoryInKBytes(17), trace.getMemoryInKBytes(13), trace.getMemoryInKBytes(17));
-        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(5);
-        parNewPromotionFailed.add(young, tenured, heap);
-        record(parNewPromotionFailed);
-
-        ConcurrentModeFailure concurrentModeFailure = new ConcurrentModeFailure(getClock().add(startTimeGap), GCCause.PROMOTION_FAILED, concurrentModeFailurePause);
-
-        heap = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 20);
-        tenured = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(13);
-        concurrentModeFailure.add(heap.minus(tenured), tenured, heap);
-        concurrentModeFailure.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
-        concurrentModeFailure.add(extractCPUSummary(line));
-        record(concurrentModeFailure);
+        publish(concurrentModeFailure);
 
     }
 
@@ -1472,7 +1453,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         collection.add(heap.minus(tenured), tenured, heap);
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     //42384.024: [Full GC [PSYoungGen: 1696K->0K(70464K)] [PSFull: 928442K->125867K(932096K)] 930139K->125867K(1002560K) [PSPermGen: 37030K->37030K(65536K)], 117.0312620 secs]
@@ -1480,14 +1461,14 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         GCCause cause = trace.gcCause();
         FullGC collection;
         if (cause == GCCause.JAVA_LANG_SYSTEM || cause == GCCause.HEAP_DUMP) {
-            collection = new SystemGC(getClock(), cause, trace.getDoubleGroup(trace.groupCount()));
+            collection = new SystemGC(getClock(), cause, trace.getDuration());
         } else {
-            collection = new PSFullGC(getClock(), cause, trace.getDoubleGroup(trace.groupCount()));
+            collection = new PSFullGC(getClock(), cause, trace.getDuration());
         }
-        collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(5), trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(11), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 17));
+        collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(8), trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(14), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 20));
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     //0.645: [Full GC (System) 0.645: [CMS: 1170K->1606K(3328K), 0.0434830 secs] 2474K->1606K(5504K), [CMS Perm : 9606K->9552K(21248K)], 0.0436041 secs] [Times: user=0.04 sys=0.01, real=0.04 secs]
@@ -1509,7 +1490,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
             collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
             collection.add(extractPrintReferenceGC(line));
             collection.add(extractCPUSummary(line));
-            record(collection);
+            publish(collection);
         } catch (Throwable t) {
             LOGGER.log(Level.SEVERE, getClock().getTimeStamp() + " : parsing record resulted in an exception", t);
         }
@@ -1521,38 +1502,38 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         ParNew parNew = new ParNew(getClock(), GarbageCollectionTypes.Young, GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(trace.groupCount()));
         parNew.add(getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 3));
         parNew.add(extractCPUSummary(line));
-        record(parNew);
+        publish(parNew);
     }
 
     public void youngNoDetails(GCLogTrace trace, String line) {
-        YoungGC youngGC = new YoungGC(getClock(), GarbageCollectionTypes.Young, GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(trace.groupCount()));
-        youngGC.add(getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 3));
+        YoungGC youngGC = new YoungGC(getClock(), GarbageCollectionTypes.Young, GCCause.UNKNOWN_GCCAUSE, trace.getDuration());
+        youngGC.add(getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 6));
         youngGC.add(extractCPUSummary(line));
-        record(youngGC);
+        publish(youngGC);
     }
 
     public void cmsNoDetails(GCLogTrace trace, String line) {
         if (expectRemark) {
             expectRemark = false;
             CMSRemark remark = new CMSRemark(getClock(), trace.getDoubleGroup(trace.groupCount()));
-            remark.add(getTotalOccupancyWithTotalHeapSizeSummary(trace, 3));
+            remark.add(getTotalOccupancyWithTotalHeapSizeSummary(trace, 6));
             remark.add(extractCPUSummary(line));
-            record(remark);
+            publish(remark);
         } else {
             expectRemark = true;
             InitialMark initialMark = new InitialMark(getClock(), trace.getDoubleGroup(trace.groupCount()));
-            initialMark.add(getTotalOccupancyWithTotalHeapSizeSummary(trace, 3));
+            initialMark.add(getTotalOccupancyWithTotalHeapSizeSummary(trace, 6));
             initialMark.add(extractCPUSummary(line));
-            record(initialMark);
+            publish(initialMark);
         }
     }
 
     // 29.975: [Full GC 155252K->44872K(205568K), 0.3398460 secs]
     public void fullNoGCDetails(GCLogTrace trace, String line) {
         expectRemark = false;
-        FullGC fullGC = new FullGC(getClock(), GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(trace.groupCount()));
-        fullGC.add(getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 3));
-        record(fullGC);
+        FullGC fullGC = new FullGC(getClock(), GCCause.UNKNOWN_GCCAUSE, trace.getDuration());
+        fullGC.add(getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 6));
+        publish(fullGC);
     }
 
     //81627.388: [ParNew
@@ -1577,12 +1558,12 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
             ParNew parNew = new ParNew(scavengeTimeStamp, GarbageCollectionTypes.ParNew, GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(trace.groupCount()));
             parNew.add(getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 1));
             parNew.add(extractCPUSummary(line));
-            record(parNew);
+            publish(parNew);
         } else if (garbageCollectionTypeForwardReference == GarbageCollectionTypes.Young) {
             YoungGC youngGC = new YoungGC(scavengeTimeStamp, GarbageCollectionTypes.Young, GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(trace.groupCount()));
             youngGC.add(getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 1));
             youngGC.add(extractCPUSummary(line));
-            record(youngGC);
+            publish(youngGC);
         }
     }
 
@@ -1591,15 +1572,15 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     public void cmfSimple(GCLogTrace trace, String line) {
         ConcurrentModeFailure concurrentModeFailure = new ConcurrentModeFailure(getClock(), trace.gcCause(), trace.getDoubleGroup(trace.groupCount()));
         concurrentModeFailure.add(extractCPUSummary(line));
-        record(concurrentModeFailure);
+        publish(concurrentModeFailure);
     }
 
     //939.183: [GC [PSYoungGen: 523744K->844K(547584K)] 657668K->135357K(1035008K), 0.0157986 secs] [Times: user=0.30 sys=0.01, real=0.02 secs]
     public void psYoungGen(GCLogTrace trace, String line) {
         PSYoungGen collection = new PSYoungGen(getClock(), trace.gcCause(), trace.getDoubleGroup(trace.groupCount()));
-        collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(5), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 11));
+        collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(8), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 14));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     public void psFull(GCLogTrace trace, String line) {
@@ -1611,7 +1592,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
             collection = new FullGC(trace.getDateTimeStamp(), cause, trace.getDuration());
         }
         collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(4));
-        record(collection);
+        publish(collection);
     }
 
     public void psYoungNoDetails(GCLogTrace trace, String line) {
@@ -1619,11 +1600,11 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         if (GCCause.JAVA_LANG_SYSTEM == cause) { // bug in 1.8.0_121 makes Full System.gc() look like a young collection
             SystemGC collection = new SystemGC(trace.getDateTimeStamp(), GCCause.JAVA_LANG_SYSTEM, trace.getDuration());
             collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(4));
-            record(collection);
+            publish(collection);
         } else {
             PSYoungGen collection = new PSYoungGen(trace.getDateTimeStamp(), cause, trace.getDuration());
             collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(4));
-            record(collection);
+            publish(collection);
         }
     }
 
@@ -1639,7 +1620,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         referenceGCForwardReference = extractPrintReferenceGC(line);
         collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(28), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 34));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     //2011-02-12T14:13:59.378+0000: 50128.698: [GC
@@ -1683,7 +1664,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         collection.add(extractPrintReferenceGC(line));
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     //47047.534: [Full GC (System.gc()) 47047.534: [Tenured: 292298K->278286K(699072K), 0.7450752 secs] 350258K->278286K(1013824K), [Metaspace: 99239K->99239K(1140736K)], 0.7451777 secs] [Times: user=0.74 sys=0.00, real=0.75 secs]
@@ -1695,7 +1676,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         fullGC.add(extractPrintReferenceGC(line));
         fullGC.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         fullGC.add(extractCPUSummary(line));
-        record(fullGC);
+        publish(fullGC);
     }
 
     public void serialFullReference(GCLogTrace trace, String line) {
@@ -1707,7 +1688,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         collection.add(extractPrintReferenceGC(line));
         collection.add(extractCPUSummary(line));
         collection.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
-        record(collection);
+        publish(collection);
     }
 
     public void psFullErgonomicsPhases(GCLogTrace trace, String line) {
@@ -1721,19 +1702,19 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     }
 
     public void psDetailsWithTenuring(GCLogTrace trace, String line) {
-        PSYoungGen collection = new PSYoungGen(scavengeTimeStamp, gcCauseForwardReference, trace.getDoubleGroup(trace.groupCount()));
+        PSYoungGen collection = new PSYoungGen(scavengeTimeStamp, gcCauseForwardReference, trace.getDuration());
         collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(2), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 8));
         if (referenceGCForwardReference != null)
             collection.add(referenceGCForwardReference);
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     //13.056: [GC-- [PSYoungGen: 4194240K->4194240K(4194240K)] 4280449K->4360823K(4361088K), 0.4589570 secs]
     //GC-- indicated a promotion failed
     public void psFailure(GCLogTrace trace, String line) {
         PSYoungGen collection = new PSYoungGen(getClock(), GCCause.PROMOTION_FAILED, trace.getDoubleGroup(trace.groupCount()));
-        collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(5), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 11));
+        collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(8), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 14));
     }
 
     public void psYoungAdaptiveSizePolicy(GCLogTrace trace, String line) {
@@ -1753,7 +1734,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     public void psYoungDetailsFloating(GCLogTrace trace, String line) {
         PSYoungGen collection = new PSYoungGen(scavengeTimeStamp, gcCauseForwardReference, trace.getDoubleGroup(trace.groupCount()));
         collection.add(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1), getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 7));
-        record(collection);
+        publish(collection);
     }
 
     public void psFullAdaptiveSize(GCLogTrace trace, String line) {
@@ -1776,7 +1757,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         if (referenceGCForwardReference != null)
             collection.add(referenceGCForwardReference);
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     public void psFullReferenceAdaptiveSize(GCLogTrace trace, String line) {
@@ -1789,7 +1770,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         if (GarbageCollectionTypes.DefNew == garbageCollectionTypeForwardReference) {
             DefNew youngGC = new DefNew(scavengeTimeStamp, gcCauseForwardReference, trace.getDoubleGroup(7));
             MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1);
-            MemoryPoolSummary heap = new MemoryPoolSummary(young.getOccupancyBeforeCollection() + trace.getMemoryInKBytes(9), trace.getMemoryInKBytes(20), trace.getMemoryInKBytes(16), trace.getMemoryInKBytes(20));
+            MemoryPoolSummary heap = new MemoryPoolSummary(young.getOccupancyBeforeCollection() + trace.toKBytes(9), trace.toKBytes(20), trace.toKBytes(16), trace.toKBytes(20));
             youngGC.add(young, heap);
             double cpuBreakDownRatio = trace.getDoubleGroup(7) / trace.getDoubleGroup(trace.groupCount());
             CPUSummary cpuSummary = extractCPUSummary(line);
@@ -1801,7 +1782,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
                 cpuBreakDownRatio = 1.0d - cpuBreakDownRatio;
                 cpuSummary = new CPUSummary(user * cpuBreakDownRatio, kernel * cpuBreakDownRatio, real * cpuBreakDownRatio);
             }
-            record(youngGC, false);
+            publish(youngGC, false);
 
             DateTimeStamp timeOfFullCollection = new DateTimeStamp(trace.getDoubleGroup(8)); //todo: adjust date to match and add it in.
             FullGC fullGC = new FullGC(timeOfFullCollection, gcCauseForwardReference, trace.getDoubleGroup(trace.groupCount()) - trace.getDoubleGroup(7));
@@ -1810,58 +1791,66 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
             fullGC.add(young, trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(16));
             fullGC.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
             fullGC.add(cpuSummary);
-            record(fullGC);
+            publish(fullGC);
         } else {
-            trace.notYetImplemented();
+            LOGGER.warning("Unable to parse -> " + trace);
         }
         scavengeTimeStamp = getClock();
         garbageCollectionTypeForwardReference = GarbageCollectionTypes.DefNew;
     }
 
     public void rescanSplitUnloadingString(GCLogTrace trace, String line) {
-        trace.notYetImplemented();
+        LOGGER.warning("Not Yet Implemented -> " + trace);
     }
 
     public void parNewConcurrentPhaseCards(GCLogTrace trace, String line) {
-        trace.notYetImplemented();
+        LOGGER.warning("Not Yet Implemented -> " + trace);
     }
 
     public void concurrentPhaseYields(GCLogTrace trace, String line) {
+        endOfConcurrentPhase( trace, line);
     }
 
     private void precleanTimedoutWithCards(GCLogTrace trace, String line) {
+        abortPrecleanDueToTime = true;
+        GCLogTrace concurrentPhase = new GCParseRule("X",CMS_PHASE_END).parse(line);
+        endOfConcurrentPhase(concurrentPhase, concurrentPhase.getDateTimeStamp(), 0);
     }
 
     private void shouldCollectConcurrent(GCLogTrace trace, String line) {
+        LOGGER.warning("Not Yet Implemented -> " + trace);
     }
 
     public void parNewShouldConcurrentCollect(GCLogTrace trace, String line) {
-        trace.notYetImplemented();
+        LOGGER.warning("Not yet Implemented -> " + trace);
     }
 
     private void psYoungAdaptivePolicySizeStart(GCLogTrace trace, String line) {
+        LOGGER.warning("Not yet Implemented -> " + trace);
     }
 
     private void psYoungAdaptivePolicySizeBody(GCLogTrace trace, String line) {
+        LOGGER.warning("Not yet Implemented -> " + trace);
     }
 
     private void adaptivePolicySizeBody(GCLogTrace trace, String line) {
+        LOGGER.warning("Not yet Implemented -> " + trace);
     }
 
     public void remarkSplitByDebug(GCLogTrace trace, String line) {
-        long youngOccupancy = trace.getLongGroup(4);
-        long youngConfiguredSize = trace.getLongGroup(5);
+        long youngOccupancy = trace.getLongGroup(7);
+        long youngConfiguredSize = trace.getLongGroup(8);
         youngMemoryPoolSummaryForwardReference = new MemoryPoolSummary(youngOccupancy, youngConfiguredSize, youngOccupancy, youngConfiguredSize);
     }
 
     public void scavengeBeforeRemarkReference(GCLogTrace trace, String line) {
-        parNewForwardReference = new ParNew(new DateTimeStamp(trace.getGroup(6), trace.getDoubleGroup(7)), trace.gcCause(5), trace.getDoubleGroup(48));
-        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(35);
-        MemoryPoolSummary tenured = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 42);
+        parNewForwardReference = new ParNew(trace.getDateTimeStamp(), trace.gcCause(), trace.getDoubleGroup(trace.groupCount() - 3));
+        MemoryPoolSummary young = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(59);
+        MemoryPoolSummary tenured = getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 66);
         parNewForwardReference.add(young, tenured.minus(young), tenured);
         parNewForwardReference.add(extractPrintReferenceGC(line));
         parNewForwardReference.add(extractCPUSummary(line));
-        record(parNewForwardReference, false);
+        publish(parNewForwardReference, false);
     }
 
     public void preCleanReferenceParNewReference(GCLogTrace trace, String line) {
@@ -1901,7 +1890,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         recordRescanStepTimes(remark, line);
         remark.addReferenceGCSummary(extractPrintReferenceGC(line));
         remark.add(extractCPUSummary(line));
-        record(remark);
+        publish(remark);
         remarkTimeStamp = null;
     }
 
@@ -1918,7 +1907,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
      *         recordRescanStepTimes(remark, line);
      *         remark.addReferenceGCSummary(extractPrintReferenceGC(line));
      *         remark.add(extractCPUSummary(line));
-     *         record(remark);
+     *         publish(remark);
      *     }
      * @param trace The chunk of GC log that we are attempting to match to a known GC log pattern
      * @param line The GC log line being parsed
@@ -1939,10 +1928,10 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         collection.addReferenceGCSummary(extractPrintReferenceGC(line));
         GCLogTrace weakReferenceFragment = weakReferenceFragmentRule.parse(line);
         if (weakReferenceFragment != null) {
-            collection.getReferenceGCSummary().addWeakReferences(trace.getDateTimeStamp(4), 0, weakReferenceFragment.getPauseTime());
+            collection.getReferenceGCSummary().addWeakReferences(trace.getDateTimeStamp(2), 0, weakReferenceFragment.getPauseTime());
         }
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
         remarkTimeStamp = null;
     }
 
@@ -1952,19 +1941,25 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
 
 
     //************************************ end of direct support for parsing rules
-    private void recordRemark(GCLogTrace trace, String line, int offset, GCCause gcCause) {
-        CMSRemark collection;
-        if (gcCause == GCCause.UNKNOWN_GCCAUSE)
-            collection = new CMSRemark(getClock(), trace.getDoubleGroup(trace.groupCount()));
-        else
-            collection = new CMSRemark(getClock(), gcCause, trace.getDoubleGroup(trace.groupCount()));
+    private final GCParseRule cmsRemarkBlockRule = new GCParseRule("CMS_REMARK_BLOCK", REMARK_BLOCK);
+    private void recordRemark(GCLogTrace trace, String line, GCCause gcCause) {
 
-        MemoryPoolSummary tenured = trace.getOccupancyWithMemoryPoolSizeSummary(offset);
-        MemoryPoolSummary heap = getTotalOccupancyWithTotalHeapSizeSummary(trace, offset + 4);
-        collection.add(heap.minus(tenured), tenured, heap);
-        recordRescanStepTimes(collection, line);
-        collection.add(extractCPUSummary(line));
-        record(collection);
+        CMSRemark collection =  (gcCause == GCCause.UNKNOWN_GCCAUSE)
+                ? new CMSRemark(getClock(), trace.getDuration())
+                : new CMSRemark(getClock(), gcCause, trace.getDuration());
+
+        // stabilizes memory pool sizing information
+        GCLogTrace remarkBlock = cmsRemarkBlockRule.parse(line);
+        if ( remarkBlock == null) {
+            LOGGER.warning("Internal error, unable to parse CMS information from " + line);
+        } else {
+            MemoryPoolSummary tenured = remarkBlock.getOccupancyWithMemoryPoolSizeSummary();
+            MemoryPoolSummary heap = remarkBlock.getOccupancyWithMemoryPoolSizeSummary();
+            collection.add(heap.minus(tenured), tenured, heap);
+            recordRescanStepTimes(collection, line);
+            collection.add(extractCPUSummary(line));
+            publish(collection);
+        }
     }
 
     //124.310: [GC (CMS Final Remark) [YG occupancy: 670314 K (737280 K)]124.310: [Rescan (parallel) , 0.1178559 secs]124.428: [weak refs processing124.428: [SoftReference, 0 refs, 0.0000046 secs]124.428: [WeakReference, 0 refs, 0.0000028 secs]124.428: [FinalReference, 0 refs, 0.0000026 secs]124.428: [PhantomReference, 0 refs, 0 refs, 0.0000032 secs]124.428: [JNI Weak Reference, 0.0000094 secs], 0.0000365 secs]124.428: [class unloading, 0.0056223 secs]124.434: [scrub symbol table, 0.0028174 secs]124.437: [scrub string table, 0.0021200 secs][1 CMS-remark: 2896239K(3375104K)] 3566554K(4112384K), 0.1290335 secs] [Times: user=0.94 sys=0.01, real=0.12 secs]
@@ -1983,7 +1978,7 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
         recordRescanStepTimes(collection, line);
         collection.addReferenceGCSummary(extractPrintReferenceGC(line));
         collection.add(extractCPUSummary(line));
-        record(collection);
+        publish(collection);
     }
 
     /*
@@ -1994,70 +1989,199 @@ public class GenerationalHeapParser extends PreUnifiedGCLogParser implements Sim
     */
 
     private void log(String line) {
-        if (CONCURRENT_PHASE_START.parse(line) != null) return;
-        if (CONCURRENT_PHASE_END.parse(line) != null) return;
-        if (ABORT_PRECLEAN_DUE_TO_TIME_CLAUSE.parse(line) != null) return;
-        if (PRECLEAN_REFERENCE.parse(line) != null) return;
-        if (line.startsWith("Missed: GC locker: Trying a full collection because scavenge failed")) return;
-
-        if (line.startsWith("PSYoungGen")) return;
-        if (line.startsWith("eden space")) return;
-        if (line.startsWith("to")) return;
-        if (line.startsWith("from")) return;
-        if (line.startsWith("ParOldGen")) return;
-        if (line.startsWith("PSOldGen")) return;
-        if (line.startsWith("space")) return;
-        if (line.startsWith("object space")) return;
-        if (line.startsWith("PSPermGen")) return;
-        if (line.startsWith("{Heap")) return;
-        if (line.startsWith("}")) return;
-        if (line.startsWith("Heap")) return;
-        if (line.startsWith("[Times: user")) return;
+//        if (CONCURRENT_PHASE_START.parse(line) != null) return;
+//        if (CONCURRENT_PHASE_END.parse(line) != null) return;
+//        if (ABORT_PRECLEAN_DUE_TO_TIME_CLAUSE.parse(line) != null) return;
+//        if (PRECLEAN_REFERENCE.parse(line) != null) return;
+//        if (line.startsWith("Missed: GC locker: Trying a full collection because scavenge failed")) return;
+//
+//        if (line.startsWith("PSYoungGen")) return;
+//        if (line.startsWith("eden space")) return;
+//        if (line.startsWith("to")) return;
+//        if (line.startsWith("from")) return;
+//        if (line.startsWith("ParOldGen")) return;
+//        if (line.startsWith("PSOldGen")) return;
+//        if (line.startsWith("space")) return;
+//        if (line.startsWith("object space")) return;
+//        if (line.startsWith("PSPermGen")) return;
+//        if (line.startsWith("{Heap")) return;
+//        if (line.startsWith("}")) return;
+//        if (line.startsWith("Heap")) return;
+//        if (line.startsWith("[Times: user")) return;
+        if ( line.startsWith("Metaspace       used")) return;
+        if ( line.startsWith("class space    used")) return;
         if (line.startsWith("par new generation   total")) return;
-        if (line.startsWith("concurrent mark-sweep generation total")) return;
+//        if (line.startsWith("concurrent mark-sweep generation total")) return;
         if (line.startsWith("concurrent-mark-sweep perm gen total")) return;
         if (line.startsWith("(cardTable: ")) return;
-        if (line.contains("CMS-concurrent-abortable-preclean")) return;
-        if (line.contains("committed")) return;
+//        if (line.contains("CMS-concurrent-abortable-preclean")) return;
+//        if (line.contains("committed")) return;
         if (line.startsWith("def new generation   total")) return;
-        if (line.startsWith("Before GC:")) return;
-        if (line.startsWith("After GC:")) return;
-        if (line.contains("GC log file created")) return;
-        if (line.contains("GC log file has reached the maximum size")) return;
-        if (line.contains("Large block")) return;
-
-        if (debugging)
-            LOGGER.fine("GenerationalHeapParser missed: " + line);
+//        if (line.startsWith("Before GC:")) return;
+//        if (line.startsWith("After GC:")) return;
+//        if (line.contains("GC log file created")) return;
+//        if (line.contains("GC log file has reached the maximum size")) return;
+//        if (line.contains("Large block")) return;
+//
+//        GCToolKit.LOG_DEBUG_MESSAGE(() -> "GenerationalHeapParser missed: " + line);
+        if (line.contains("CMSCMS: Large block")) return;
         LOGGER.log(Level.WARNING, "Missed: {0}", line);
 
+    }
+
+    private DateTimeStamp startOfConcurrentPhase;
+
+    //this rule must be evaluated before CONCURRENT_PHASE_END_BLOCK
+    private void abortPrecleanDueToTime(GCLogTrace trace, String line) {
+        try {
+            double cpuTime = trace.getDoubleGroup(7);
+            double wallClock = trace.getDoubleGroup(8);
+            publish(new AbortablePreClean(startOfConcurrentPhase, wallClock, cpuTime, wallClock, true));
+            abortPrecleanDueToTime = false;
+        } catch (Exception e) {
+            LOGGER.warning("concurrent phase end choked on " + trace);
+        }
+    }
+
+    private void abortPrecleanWithCards(GCLogTrace trace, String line) {
+        try {
+            double cpuTime = trace.getDoubleGroup(10);
+            double wallClock = trace.getDoubleGroup(11);
+            publish(new AbortablePreClean(startOfConcurrentPhase, wallClock, cpuTime, wallClock, false));
+            abortPrecleanDueToTime = false;
+        } catch (Exception e) {
+            LOGGER.warning("concurrent phase end choked on " + trace);
+        }
+    }
+
+    private void startOfConcurrentPhase(GCLogTrace trace, String line) {
+        startOfConcurrentPhase = trace.getDateTimeStamp();
+    }
+    private void endOfConcurrentPhase(GCLogTrace trace, String line) {
+        DateTimeStamp endOfPhase = trace.getDateTimeStamp();
+        endOfConcurrentPhase(trace, endOfPhase, 0);
+    }
+
+    private void endConcurrentPrecleanWithReferenceProcessing(GCLogTrace trace, String line) {
+        GCLogTrace concurrentBlock = CONCURRENT_PHASE_END_BLOCK.parse(line);
+        try {
+            publish(new ConcurrentPreClean(startOfConcurrentPhase, concurrentBlock.getDoubleGroup(11), concurrentBlock.getDoubleGroup(7), concurrentBlock.getDoubleGroup(8)));
+        } catch (Throwable t) {
+            LOGGER.warning("Unable to extract data from " + trace.toString());
+        }
+    }
+
+    private void endOfConcurrentPhase(GCLogTrace trace, DateTimeStamp timeStamp, int offset) {
+        String phase = trace.getGroup(6 + offset);
+        double cpuTime = trace.getDoubleGroup(7 + offset);
+        double wallTime = trace.getDoubleGroup(8 + offset);
+        double duration = timeStamp.toSeconds() - startOfConcurrentPhase.toSeconds();
+
+        switch (phase) {
+            case "mark":
+                publish(new ConcurrentMark(startOfConcurrentPhase, duration, cpuTime, wallTime));
+                break;
+            case "preclean":
+                publish(new ConcurrentPreClean(startOfConcurrentPhase, duration, cpuTime, wallTime));
+                break;
+            case "abortable-preclean":
+                publish(new AbortablePreClean(startOfConcurrentPhase, duration, cpuTime, wallTime, abortPrecleanDueToTime));
+                abortPrecleanDueToTime = false;
+                break;
+            case "sweep":
+                publish(new ConcurrentSweep(startOfConcurrentPhase, duration, cpuTime, wallTime));
+                break;
+            case "reset":
+                publish(new ConcurrentReset(startOfConcurrentPhase, duration, cpuTime, wallTime));
+                break;
+            default:
+                LOGGER.warning("concurrent phase choked on " + trace);
+        }
     }
 
     public void logMissedFirstRecordForEvent(String line) {
         LOGGER.log(Level.WARNING, "Missing initial record for: {0}", line);
     }
 
-    public void record(JVMEvent event, boolean clear) {
-        consumer.record(event);
-        if (clear) {
-            garbageCollectionTypeForwardReference = null;
-            gcCauseForwardReference = GCCause.UNKNOWN_GCCAUSE;
-            fullGCTimeStamp = null;
-            scavengeTimeStamp = null;
-            youngMemoryPoolSummaryForwardReference = null;
-            tenuredForwardReference = null;
-            heapForwardReference = null;
-            scavengeDurationForwardReference = 0.0;
-            scavengeCPUSummaryForwardReference = null;
-            referenceGCForwardReference = null;
-            totalFreeSpaceForwardReference = 0;
-            maxChunkSizeForwardReference = 0;
-            numberOfBlocksForwardReference = 0;
-            averageBlockSizeForwardReference = 0;
-            treeHeightForwardReference = 0;
+    private void clear() {
+        garbageCollectionTypeForwardReference = null;
+        gcCauseForwardReference = GCCause.UNKNOWN_GCCAUSE;
+        fullGCTimeStamp = null;
+        scavengeTimeStamp = null;
+        youngMemoryPoolSummaryForwardReference = null;
+        tenuredForwardReference = null;
+        heapForwardReference = null;
+        scavengeDurationForwardReference = 0.0;
+        scavengeCPUSummaryForwardReference = null;
+        referenceGCForwardReference = null;
+        totalFreeSpaceForwardReference = 0;
+        maxChunkSizeForwardReference = 0;
+        numberOfBlocksForwardReference = 0;
+        averageBlockSizeForwardReference = 0;
+        treeHeightForwardReference = 0;
+    }
+
+    public void publish( JVMEvent event, boolean drain, boolean clear) {
+        publish(event,clear);
+        if (drain) {
+            for( GenerationalGCPauseEvent pauseEvent : queue)
+                publish(pauseEvent, false);
+            queue.clear();
         }
     }
 
-    public void record(JVMEvent event) {
-        this.record(event, true);
+    public void publish(JVMEvent event, boolean clear) {
+        if (clear)
+            clear();
+        super.publish(ChannelName.GENERATIONAL_HEAP_PARSER_OUTBOX, event);
+    }
+
+    final private ArrayList<GenerationalGCPauseEvent> queue = new ArrayList<>();
+    public void publish(GenerationalGCPauseEvent event) {
+        if ( inConcurrentPhase) {
+            queue.add(event);
+            clear();
+        } else
+            this.publish(event, true);
+    }
+
+    public void publish(CMSConcurrentEvent event) {
+        inConcurrentPhase = false;
+        publish( event, true, false);
+    }
+
+    @Override
+    public boolean accepts(Diary diary) {
+        return (diary.isGenerational() || diary.isCMS() ) && ! diary.isUnifiedLogging();
+    }
+
+    @Override
+    public void publishTo(JVMEventChannel bus) {
+        super.publishTo(bus);
     }
 }
+
+/*
+  todo: this is a very old but bad corruption...
+  ParNew starts, the output is interrupted by the start of an abortable-preclean but then a CMF happens smashing everything
+  At the moment the abortable-preclean and the CMF is reported on, the ParNew is missed.
+  In all honesty, missing a single ParNew isn't going to change the conclusion of any analysis so I'm opt-ing to leave it.
+  2014-06-10T22:56:26.242-0700: 4999535.014: [GC2014-06-10T22:56:26.242-0700: 4999535.014: [ParNew2014-06-10T22:56:26.256-0700: 4999535.028: [CMS-concurrent-abortable-preclean: 1.948/3.114 secs] [Times: user=1.93 sys=0.12, real=3.11 secs]
+ (promotion failed)
+Desired survivor size 8716288 bytes, new threshold 6 (max 6)
+- age   1:    1036320 bytes,    1036320 total
+- age   2:     825248 bytes,    1861568 total
+- age   3:     119024 bytes,    1980592 total
+- age   4:     113784 bytes,    2094376 total
+- age   5:     129024 bytes,    2223400 total
+- age   6:     154976 bytes,    2378376 total
+: 141769K->140729K(153344K), 0.3807730 secs]2014-06-10T22:56:26.623-0700: 4999535.395: [CMS
+ (concurrent mode failure): 1920816K->50773K(1926784K), 28.3938140 secs] 2062055K->50773K(2080128K), [CMS Perm : 48657K->41071K(262144K)], 28.7750370 secs] [Times: user=1.65 sys=0.03, real=28.78 secs]
+
+ A normal record looks like this
+ 2014-06-10T23:00:18.728-0700: 4999767.501: [GC2014-06-10T23:00:18.728-0700: 4999767.501: [ParNew
+Desired survivor size 8716288 bytes, new threshold 6 (max 6)
+- age   1:     775312 bytes,     775312 total
+- age   2:     497168 bytes,    1272480 total
+: 138559K->1370K(153344K), 0.0215080 secs] 189332K->52143K(2080128K), 0.0217400 secs] [Times: user=0.04 sys=0.00, real=0.02 secs]
+ */

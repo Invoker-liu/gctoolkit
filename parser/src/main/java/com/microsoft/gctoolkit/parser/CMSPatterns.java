@@ -41,12 +41,15 @@ public interface CMSPatterns extends SharedPatterns {
     /**********  CMS Phase records **********/
     //3.307: [GC [1 CMS-initial-mark: 0K(18874368K)] 302009K(20761856K), 0.0994470 secs] [Times: user=0.20 sys=0.00, real=0.10 secs]
     //12.986: [GC[1 CMS-initial-mark: 33532K(62656K)] 49652K(81280K), 0.0014191 secs] [Times: user=0.00 sys=0.00, real=0.00 secs]
+    //40.971: [GC (CMS Initial Mark) [1 CMS-initial-mark: 2692K(5376K)] 38078K(354944K), 0.0147940 secs] [Times: user=0.01 sys=0.00, real=0.02 secs]
     GCParseRule INITIAL_MARK = new GCParseRule("INITIAL_MARK", GC_PREFIX + "\\[1 CMS-initial-mark: " + OCCUPANCY_CONFIGURED + "\\] " + OCCUPANCY_CONFIGURED_PAUSE + "\\]");
     GCParseRule CONCURRENT_PHASE_START = new GCParseRule("CONCURRENT_PHASE_START", "^" + CMS_PHASE_START);
-    GCParseRule CONCURRENT_PHASE_END = new GCParseRule("CONCURRENT_PHASE_END", "^" + CMS_PHASE_END);
+
+    GCParseRule CONCURRENT_PHASE_END = new GCParseRule("CONCURRENT_PHASE_END", "^" + CMS_PHASE_END + "$");
+    GCParseRule CONCURRENT_PHASE_END_WITH_CPU_SUMMARY = new GCParseRule("CONCURRENT_PHASE_END", "^" + CMS_PHASE_END + " " + CPU_SUMMARY);
 
     GCParseRule CONCURRENT_PHASE_START_BLOCK = new GCParseRule("CONCURRENT_PHASE_START_BLOCK", CMS_PHASE_START);
-    GCParseRule CONCURRENT_PHASE_END_BLOCK = new GCParseRule("CONCURRENT_PHASE_END_BLOCK", CMS_PHASE_END);
+    GCParseRule CONCURRENT_PHASE_END_BLOCK = new GCParseRule("CONCURRENT_PHASE_END_BLOCK", CMS_PHASE_END + " " + CPU_SUMMARY);
     GCParseRule ABORT_PRECLEAN_DUE_TO_TIME_CLAUSE = new GCParseRule("ABORT_PRECLEAN_DUE_TO_TIME_CLAUSE", "^" + ABORT_PRECLEAN_DUE_TO_TIME_BLOCK);
 
     /********** Remark statements **********/
@@ -172,7 +175,7 @@ public interface CMSPatterns extends SharedPatterns {
     GCParseRule SERIAL_FULL = new GCParseRule("SERIAL_FULL", FULL_GC_PREFIX + SERIAL_TENURED_BLOCK + " " + BEFORE_AFTER_CONFIGURED + ", " + PERM_RECORD + ", " + PAUSE_TIME);
 
     //1.244: [Full GC (Metadata GC Threshold) 1.244: [Tenured: 11155K->92012K(21888K), 0.0399330 secs] 18738K->09212K(31680K), [Metaspace: 20778K->20778K(1067008K)], 0.0405118 secs] [Times: user=0.04 sys=0.00, real=0.04 secs]
-    GCParseRule SERIAL_FULL80 = new GCParseRule("SERIAL_FULL80", FULL_GC_PREFIX + SERIAL_TENURED_BLOCK + " " + BEFORE_AFTER_CONFIGURED + ", " + META_RECORD + ", " + PAUSE_TIME);
+    //GCParseRule SERIAL_FULL80 = new GCParseRule("SERIAL_FULL80", FULL_GC_PREFIX + SERIAL_TENURED_BLOCK + " " + BEFORE_AFTER_CONFIGURED + ", " + META_RECORD + ", " + PAUSE_TIME);
 
     //11.675: [GC 11.675: [ParNew: 3782K->402K(3904K), 0.0012156 secs]11.676: [Tenured: 8673K->6751K(8840K), 0.1268332 secs] 12373K->6751K(12744K), [Perm : 10729K->10675K(21248K)], 0.1281985 secs]
     //89.260: [GC 89.260: [ParNew: 19135K->19135K(19136K), 0.0000156 secs]89.260: [CMS: 105875K->107775K(107776K), 0.5703972 secs] 125011K->116886K(126912K), [CMS Perm : 15589K->15584K(28412K)], 0.5705219 secs]
@@ -244,8 +247,8 @@ public interface CMSPatterns extends SharedPatterns {
     // (concurrent mode failure): 62354K->8302K(64768K), 0.0931888 secs] 79477K->8302K(83392K), [CMS Perm : 10698K->10698K(21248K)], 0.0956950 secs] [Times: user=0.09 sys=0.00, real=0.09 secs]
     //(concurrent mode failure): 1044403K->1048509K(1048576K), 26.3929433 secs] 1478365K->1059706K(1520448K), 26.7743013 secs]
     // (concurrent mode failure): 62169K->8780K(64768K), 0.0909138 secs] 79462K->8780K(83392K), [CMS Perm : 10688K->10687K(21248K)], 0.0938215 secs]
-    GCParseRule CONCURRENT_MODE_FAILURE_DETAILS = new GCParseRule("CONCURRENT_MODE_FAILURE_DETAILS", "^\\(concurrent mode (?:failure|interrupted)\\): " + BEFORE_AFTER_CONFIGURED_PAUSE + "\\] " + BEFORE_AFTER_CONFIGURED + "(?:, " + PERM_RECORD + ")?, " + PAUSE_TIME + "\\]");
-    GCParseRule CONCURRENT_MODE_FAILURE_DETAILS_META = new GCParseRule("CONCURRENT_MODE_FAILURE_DETAILS_META", "^\\(concurrent mode (?:failure|interrupted)\\): " + BEFORE_AFTER_CONFIGURED_PAUSE + "\\] " + BEFORE_AFTER_CONFIGURED + "(?:, " + META_RECORD + ")?, " + PAUSE_TIME + "\\]");
+    GCParseRule CONCURRENT_MODE_FAILURE_DETAILS = new GCParseRule("CONCURRENT_MODE_FAILURE_DETAILS", "^\\s*\\(concurrent mode (?:failure|interrupted)\\): " + BEFORE_AFTER_CONFIGURED_PAUSE + "\\] " + BEFORE_AFTER_CONFIGURED + "(?:, " + PERM_RECORD + ")?, " + PAUSE_TIME + "\\]");
+    GCParseRule CONCURRENT_MODE_FAILURE_DETAILS_META = new GCParseRule("CONCURRENT_MODE_FAILURE_DETAILS_META", "^\\s*\\(concurrent mode (?:failure|interrupted)\\): " + BEFORE_AFTER_CONFIGURED_PAUSE + "\\] " + BEFORE_AFTER_CONFIGURED + "(?:, " + META_RECORD + ")?, " + PAUSE_TIME + "\\]");
 
     ////1.147: [Full GC (System) 1.147: [Tenured: 1827K->1889K(5312K), 0.0478658 secs] 2441K->1889K(7616K), [Perm : 10118K->10118K(21248K)], 0.0479395 secs]
     //1.149: [Full GC (System) 1.149: [CMS: 0K->1602K(62656K), 0.0761581 secs] 4659K->1602K(81280K), [CMS Perm : 10118K->10064K(21248K)], 0.0762653 secs] [Times: user=0.06 sys=0.01, real=0.08 secs]
@@ -256,6 +259,7 @@ public interface CMSPatterns extends SharedPatterns {
 
     // 2015-02-04T17:36:07.103-0500: 199626.435: [GC 199626.435: [ParNew: 812672K->812672K(914240K), 0.0000400 secs]199626.435: [CMS (concurrent mode failure): 1071394K->1081343K(1081344K), 6.8504740 secs] 1884066K->1092775K(1995584K), [CMS Perm : 99417K->99411K(524288K)], 6.8510440 secs] [Times: user=6.63 sys=0.02, real=6.85 secs]
     // 199626.435: [GC 199626.435: [ParNew: 812672K->812672K(914240K), 0.0000400 secs]199626.435: [CMS (concurrent mode failure): 1071394K->1081343K(1081344K), 6.8504740 secs] 1884066K->1092775K(1995584K), [CMS Perm : 99417K->99411K(524288K)], 6.8510440 secs] [Times: user=6.63 sys=0.02, real=6.85 secs]
+    // 199626.435: [GC 199626.435: [ParNew: 812672K->812672K(914240K), 0.0000400 secs]199626.435: [CMS (concurrent mode failure): 1071394K->1081343K(1081344K), 6.8504740 secs] 1884066K->1092775K(1995584K), [Metaspace: 99417K->99411K(524288K)], 6.8510440 secs] [Times: user=6.63 sys=0.02, real=6.85 secs]
     GCParseRule PARNEW_CONCURRENT_MODE_FAILURE_PERM = new GCParseRule("PARNEW_CONCURRENT_MODE_FAILURE_PERM", GC_PREFIX + PARNEW_BLOCK + TIMESTAMP + "\\[CMS \\(concurrent mode failure\\): " + BEFORE_AFTER_CONFIGURED_PAUSE + "\\] " + BEFORE_AFTER_CONFIGURED + ", " + PERM_RECORD + ", " + PAUSE_TIME + "\\]");
     GCParseRule PARNEW_CONCURRENT_MODE_FAILURE_META = new GCParseRule("PARNEW_CONCURRENT_MODE_FAILURE_META", GC_PREFIX + PARNEW_PROMOTION_FAILED_BLOCK + TIMESTAMP + "\\[CMS: " + BEFORE_AFTER_CONFIGURED_PAUSE + "\\] " + BEFORE_AFTER_CONFIGURED + ", " + META_RECORD + ", " + PAUSE_TIME + "\\]");
     //4.327: [FUll GC 4.328: [ParNew: 196768K->180907K(471872K), 0.1321291 secs]4.460: [CMS (concurrent mode failure): 473195K->376198K(1048576K), 5.1817732 secs] 668966K->376198K(1520448K), [CMS Perm : 13108K->27169K(13172K)], 5.3146647 secs]
@@ -307,7 +311,7 @@ public interface CMSPatterns extends SharedPatterns {
     GCParseRule RESCAN_CARDS_DETAILS = new GCParseRule("RESCAN_CARDS_DETAILS", "^, " + PAUSE_TIME + "\\]" + WEAK_REF_BLOCK + " " + REMARK_BLOCK);
 
     //, 0.2020511 secs]34.132: [weak refs processing, 0.0000108 secs]34.132: [class unloading, 0.0026382 secs]34.135: [scrub symbol & string tables, 0.0026847 secs] [1 CMS-remark: 0K(4194304K)] 889188K(5872064K), 0.2081265 secs]
-    GCParseRule RESCAN_SPLIT_UNLOADING_STRING = new GCParseRule("RESCAN_SPLIT_UNLOADING_STRING", "^, " + TIMESTAMP + "\\]" + WEAK_REF_BLOCK + CLASS_UNLOADING_BLOCK + STRING_AND_SYMBOL_SCRUB_BLOCK + " " + REMARK_BLOCK);
+    GCParseRule RESCAN_SPLIT_UNLOADING_STRING = new GCParseRule("RESCAN_SPLIT_UNLOADING_STRING", "^, " + PAUSE_TIME + "\\]" + WEAK_REF_BLOCK + CLASS_UNLOADING_BLOCK + STRING_AND_SYMBOL_SCRUB_BLOCK + " " + REMARK_BLOCK);
 
     //, 1.2157670 secs]42102.265: [weak refs processing, 0.1038920 secs]Work queue overflow (benign) (pmc_rm=1542597, kac=0)
     GCParseRule RESCAN_OVERFLOW_DETAILS = new GCParseRule("RESCAN_OVERFLOW_DETAILS", "^, " + PAUSE_TIME + "\\]" + WEAK_REF_BLOCK + "Work queue overflow");

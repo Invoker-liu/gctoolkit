@@ -2,7 +2,10 @@
 // Licensed under the MIT License.
 package com.microsoft.gctoolkit.parser;
 
+import com.microsoft.gctoolkit.GCToolKit;
 import org.junit.jupiter.api.Test;
+
+import java.util.StringJoiner;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -26,33 +29,32 @@ public class ConcurrentMarkSweepParserRulesTest implements CMSPatterns {
                 }
             }
         }
-
         assertTrue(true);
     }
 
     /* Code that is useful when testing individual records */
 
-    private final boolean debugging = Boolean.getBoolean("microsoft.debug");
-
     //@Test
     //@Ignore("Not a real test, only for debugging")
     public void testDebugCMSParseRule() {
         int index = rules.length-1; // awesome fix from David.. thanks :-)
-        //index = 36;
+        index = 43;
         GCParseRule rule = rules[index];
-        evaluate(rule, lines[index][0], debugging);
+        evaluate(rule, lines[index][0]);
     }
 
-    private void evaluate(GCParseRule rule, String string, boolean dump) {
+    private void evaluate(GCParseRule rule, String string) {
         //The IDE eats messages printed to the log file.. thus this information *is* printed to stout
         GCLogTrace trace = rule.parse(string);
         assertNotNull(trace);
-        if (dump) {
-            System.out.println("matches groups " + trace.groupCount());
+        // Enable debugging by setting gctoolkit.debug to true
+        GCToolKit.LOG_DEBUG_MESSAGE(() -> {
+            StringBuilder sb = new StringBuilder("matches groups " + trace.groupCount());
             for (int i = 0; i <= trace.groupCount(); i++) {
-                System.out.println(i + ": " + trace.getGroup(i));
+                sb.append(String.format("%n%d : %s", i, trace.getGroup(i))) ;
             }
-        }
+            return sb.toString();
+        });
     }
 
     private GCParseRule[] rules = {
@@ -96,7 +98,11 @@ public class ConcurrentMarkSweepParserRulesTest implements CMSPatterns {
             SPLIT_PARNEW_PROMOTION_FAILED_IN_CMS_PHASE,
             FULL_SPLIT_BY_CONCURRENT_PHASE,
             CMF_LARGE_BLOCK,
-            PRECLEAN_REFERENCE_PAR_NEW_REFERENCE
+            PRECLEAN_REFERENCE_PAR_NEW_REFERENCE,      // 40
+            CONC_PHASE_YIELDS,
+            CONCURRENT_PHASE_START,
+            CONCURRENT_PHASE_END,
+            CONCURRENT_PHASE_END_WITH_CPU_SUMMARY
     };
 
     private String[][] lines = {
@@ -230,6 +236,19 @@ public class ConcurrentMarkSweepParserRulesTest implements CMSPatterns {
             },
             {       // 40
                     "2020-03-27T17:20:09.966+0000: 61372.980: [Preclean SoftReferences, 0.0000064 secs]2020-03-27T17:20:09.966+0000: 61372.980: [Preclean WeakReferences, 0.0010360 secs]2020-03-27T17:20:09.967+0000: 61372.981: [Preclean FinalReferences, 0.0017374 secs]2020-03-27T17:20:09.969+0000: 61372.983: [Preclean PhantomReferences, 0.0000900 secs]2020-03-27T17:20:16.627+0000: 61379.640: [GC (Allocation Failure) 2020-03-27T17:20:16.627+0000: 61379.640: [ParNew2020-03-27T17:20:16.828+0000: 61379.842: [SoftReference, 0 refs, 0.0006072 secs]2020-03-27T17:20:16.829+0000: 61379.842: [WeakReference, 155571 refs, 0.0025794 secs]2020-03-27T17:20:16.831+0000: 61379.845: [FinalReference, 52557 refs, 0.0025628 secs]2020-03-27T17:20:16.834+0000: 61379.847: [PhantomReference, 0 refs, 4 refs, 0.0007787 secs]2020-03-27T17:20:16.835+0000: 61379.848: [JNI Weak Reference, 0.0731165 secs]"
+            },
+            {       // 41
+                    "2012-11-20T00:51:32.585+0100: 7.274: [CMS-concurrent-mark: 0.015/0.015 secs] (CMS-concurrent-mark yielded 0 times)"
+            },
+            {       // 42
+                    "8.325: [CMS-concurrent-sweep-start]"
+            },
+            {       // 43
+                    "8.327: [CMS-concurrent-sweep: 0.002/0.002 secs]"
+            },
+            {       // 44
+                    "8.327: [CMS-concurrent-sweep: 0.002/0.002 secs] [Times: user=0.01 sys=0.00, real=0.00 secs]",
+                    "27.626: [CMS-concurrent-mark: 0.070/0.089 secs] [Times: user=0.14 sys=0.00, real=0.09 secs]"
             }
     };
 }

@@ -29,9 +29,7 @@ public class ParallelParserRulesTest implements ParallelPatterns {
 
     /* Code that is useful when testing individual records */
 
-    private final boolean debugging = Boolean.getBoolean("microsoft.debug");
-
-    //@Test
+    // @Test
     public void testDebugParallelParseRules() {
         int index = 4;
         GCParseRule rule = rules[index];

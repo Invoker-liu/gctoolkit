@@ -64,33 +64,52 @@ public abstract class AbstractLogTrace {
         if (!matcher.find()) {
             return MISSING_TIMESTAMP_SENTINEL;
         }
-        return getDoubleGroup(2);
+        return convertToDouble(matcher.group(1));
     }
 
     public String getDateStamp() {
-        Matcher matcher = DATE_TIME_STAMP_RULE.matcher(trace.group(0));
-        if (matcher.find()) {
-            return matcher.group(1);
+        if (trace.find()) {
+            return trace.group(4);
         } else {
             return null;
         }
     }
 
+    /**
+     *
+     * @return the date timestamp paring found at the beginning of the GC log line.
+     */
     public DateTimeStamp getDateTimeStamp() {
         return getDateTimeStamp(1);
     }
 
-    public DateTimeStamp getDateTimeStamp(int index) {
-        Matcher matcher = DATE_TIME_STAMP_RULE.matcher(trace.group(0));
-        for (int i = 0; i < index - 1; i++)
-            if (!matcher.find())
-                break;
-        if (matcher.find()) {
-            if (matcher.group(2) == null) {
-                return new DateTimeStamp(matcher.group(1));
-            }
-            return new DateTimeStamp(matcher.group(1), convertToDouble(matcher.group(2)));
-        }
+    /**
+     * If a line contains multiple date timestamp group pairing then return the nth pair.
+     * The following example contains 3 different date timestamps. index of 1 yields 57724.218
+     * whereas index 3 yields 2010-04-21T10:45:33.367+0100@57724.319
+     * <code>
+     *     57724.218: [Full GC 57724.218: [CMS2010-04-21T10:45:33.367+0100: 57724.319: [CMS-concurrent-mark: 2.519/2.587 secs]
+     * <code/>
+     * one time stamp or a date timestamp pairing
+     * @param nth is date timestamp field pair to be returned
+     * @return the nth date timestamp pairing
+     */
+    public DateTimeStamp getDateTimeStamp(int nth) {
+        Matcher matcher;
+        if ( nth > 1) {
+            matcher = DATE_TIME_STAMP_RULE.matcher(trace.group(0));
+            for (int i = 0; i < nth; i++)
+                if (!matcher.find())
+                    break;
+        } else
+            matcher = trace;
+
+        String timeStamp = ( matcher.group(3) == null) ? matcher.group(4) : matcher.group(3);
+        String dateStamp = ( matcher.group(2) == null) ? matcher.group(5) : matcher.group(2);
+        if (timeStamp != null) {
+            return new DateTimeStamp(dateStamp, convertToDouble(timeStamp));
+        } else if ( dateStamp != null)
+            return new DateTimeStamp(dateStamp);
         return new DateTimeStamp(MISSING_TIMESTAMP_SENTINEL);
     }
 
