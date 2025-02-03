@@ -4,17 +4,23 @@ package com.microsoft.gctoolkit.parser.unittests;
 
 import com.microsoft.gctoolkit.event.GCEvent;
 import com.microsoft.gctoolkit.event.GarbageCollectionTypes;
-import com.microsoft.gctoolkit.event.g1gc.G1GCConcurrentEvent;
 import com.microsoft.gctoolkit.event.g1gc.G1GCPauseEvent;
 import com.microsoft.gctoolkit.event.jvm.JVMEvent;
 import com.microsoft.gctoolkit.event.jvm.JVMTermination;
 import com.microsoft.gctoolkit.io.GCLogFile;
 import com.microsoft.gctoolkit.io.RotatingGCLogFile;
 import com.microsoft.gctoolkit.io.SingleGCLogFile;
-import com.microsoft.gctoolkit.parser.*;
-import com.microsoft.gctoolkit.parser.jvm.JVMConfiguration;
-import com.microsoft.gctoolkit.parser.jvm.PreUnifiedJVMConfiguration;
-import com.microsoft.gctoolkit.parser.jvm.UnifiedJVMConfiguration;
+import com.microsoft.gctoolkit.jvm.Diarizer;
+import com.microsoft.gctoolkit.message.ChannelName;
+import com.microsoft.gctoolkit.message.JVMEventChannel;
+import com.microsoft.gctoolkit.message.JVMEventChannelListener;
+import com.microsoft.gctoolkit.parser.GCLogParser;
+import com.microsoft.gctoolkit.parser.GenerationalHeapParser;
+import com.microsoft.gctoolkit.parser.PreUnifiedG1GCParser;
+import com.microsoft.gctoolkit.parser.UnifiedG1GCParser;
+import com.microsoft.gctoolkit.parser.UnifiedGenerationalParser;
+import com.microsoft.gctoolkit.parser.jvm.PreUnifiedDiarizer;
+import com.microsoft.gctoolkit.parser.jvm.UnifiedDiarizer;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -45,11 +51,17 @@ public abstract class ParserTest {
             Map.entry(GarbageCollectionTypes.InitialMark, 11),
             Map.entry(GarbageCollectionTypes.Remark, 12),
             Map.entry(GarbageCollectionTypes.PSFull, 8),  // bit of a hack to account that the parser is now differentiating between Full and PSFull. (kcp 11/8/15)
+            Map.entry(GarbageCollectionTypes.ConcurrentMark, 13),
+
+            Map.entry(GarbageCollectionTypes.Concurrent_Preclean, 14),
+            Map.entry(GarbageCollectionTypes.Abortable_Preclean,15),
+            Map.entry(GarbageCollectionTypes.Concurrent_Sweep, 16),
+            Map.entry(GarbageCollectionTypes.Concurrent_Reset, 17),
+
             Map.entry(GarbageCollectionTypes.Mixed, 1),
             Map.entry(GarbageCollectionTypes.G1GCYoungInitialMark, 2),
             Map.entry(GarbageCollectionTypes.G1GCMixedInitialMark, 3),
             Map.entry(GarbageCollectionTypes.Full, 4),
-            Map.entry(GarbageCollectionTypes.ConcurrentMark, 5),
             Map.entry(GarbageCollectionTypes.G1GCConcurrentMark, 5),
             Map.entry(GarbageCollectionTypes.G1GCRemark, 7),
 
@@ -80,18 +92,17 @@ public abstract class ParserTest {
         for (int i = 0; i < invocationCounts.length; i++) {
             assertEquals(invocationCounts[i], testResults.getCount(i), "Phase Count Differs @ " + i + " for " + findGarbageCollector(i) + " in " + gcLogName);
         }
-
     }
 
-    private GCLogFile loadLogFile(Path path, boolean rotating) {
+    private GCLogFile loadLogFile(Path path, boolean rotating) throws IOException {
         return rotating ? new RotatingGCLogFile(path) : new SingleGCLogFile(path);
     }
     
-    private JVMConfiguration getJVMConfiguration(GCLogFile gcLogFile) {
+    private Diarizer getJVMConfiguration(GCLogFile gcLogFile) {
         try {
-            final JVMConfiguration jvmConfiguration = gcLogFile.isUnifiedFormat()
-                    ? new UnifiedJVMConfiguration()
-                    : new PreUnifiedJVMConfiguration();
+            final Diarizer jvmConfiguration = gcLogFile.isUnified()
+                    ? new UnifiedDiarizer()
+                    : new PreUnifiedDiarizer();
 
             gcLogFile.stream().
                     filter(Objects::nonNull).
@@ -100,56 +111,69 @@ public abstract class ParserTest {
                     map(jvmConfiguration::diarize).
                     filter(completed -> completed).
                     findFirst();
-
-            jvmConfiguration.fillInKnowns();
             return jvmConfiguration;
         } catch (IOException e) {
             fail(e.getMessage());
         }
         return null;
     }
+
+    TestResults executeParsing(GCLogFile logfile) {
+        return null;
+    }
     
     TestResults testGenerationalRotatingLogFile(Path path) throws IOException {
-        TestResults testResults = new TestResults();
         GCLogFile logfile = loadLogFile(path, true);
-        JVMConfiguration jvmConfiguration = getJVMConfiguration(logfile);
-        GenerationalHeapParser generationalHeapParser = new GenerationalHeapParser(jvmConfiguration.getDiary(), testResults);
+        Diarizer jvmConfiguration = getJVMConfiguration(logfile);
+        GenerationalHeapParser generationalHeapParser = new GenerationalHeapParser();
+        TestResults testResults = new TestResults();
+        generationalHeapParser.publishTo(testResults);
+        generationalHeapParser.diary(jvmConfiguration.getDiary());
         logfile.stream().map(String::trim).forEach(generationalHeapParser::receive);
         return testResults;
     }
 
     TestResults testGenerationalSingleLogFile(Path path) throws IOException {
-        TestResults testResults = new TestResults();
         GCLogFile logfile = loadLogFile(path, false);
-        JVMConfiguration jvmConfiguration = getJVMConfiguration(logfile);
-        GCLogParser generationalHeapParser = (jvmConfiguration.getDiary().isUnifiedLogging()) ? new UnifiedGenerationalParser(jvmConfiguration.getDiary(), testResults) : new GenerationalHeapParser(jvmConfiguration.getDiary(), testResults);
+        Diarizer jvmConfiguration = getJVMConfiguration(logfile);
+        GCLogParser generationalHeapParser = (jvmConfiguration.getDiary().isUnifiedLogging()) ? new UnifiedGenerationalParser() : new GenerationalHeapParser();
+        TestResults testResults = new TestResults();
+        generationalHeapParser.publishTo(testResults);
+        generationalHeapParser.diary(jvmConfiguration.getDiary());
         logfile.stream().map(String::trim).forEach(generationalHeapParser::receive);
         return testResults;
     }
 
     TestResults testUnifiedG1GCSingleFile(Path path) throws IOException {
-        TestResults testResults = new TestResults();
         SingleGCLogFile logfile = new SingleGCLogFile(path);
-        UnifiedJVMConfiguration unifiedJVMConfiguration = new UnifiedJVMConfiguration();
-        UnifiedG1GCParser parser = new UnifiedG1GCParser(unifiedJVMConfiguration.getDiary(), testResults);
+        Diarizer jvmConfiguration = getJVMConfiguration(logfile);
+        UnifiedG1GCParser parser = new UnifiedG1GCParser();
+        TestResults testResults = new TestResults();
+        parser.publishTo(testResults);
+        parser.diary(jvmConfiguration.getDiary());
         logfile.stream().map(String::trim).forEach(parser::receive);
         return testResults;
     }
 
     TestResults testRegionalRotatingLogFile(Path path) throws IOException {
-        TestResults testResults = new TestResults();
         GCLogFile logfile = loadLogFile(path, true);
-        JVMConfiguration jvmConfiguration = getJVMConfiguration(logfile);
-        PreUnifiedG1GCParser parser = new PreUnifiedG1GCParser(jvmConfiguration.getDiary(), testResults);
+        Diarizer jvmConfiguration = getJVMConfiguration(logfile);
+        logfile.stream().map(String::trim).forEach(jvmConfiguration::diarize);
+        PreUnifiedG1GCParser parser = new PreUnifiedG1GCParser();
+        TestResults testResults = new TestResults();
+        parser.publishTo(testResults);
+        parser.diary(jvmConfiguration.getDiary());
         logfile.stream().map(String::trim).forEach(parser::receive);
         return testResults;
     }
 
     TestResults testRegionalSingleLogFile(Path path) throws IOException {
-        TestResults testResults = new TestResults();
         GCLogFile logfile = loadLogFile(path, false);
-        JVMConfiguration jvmConfiguration = getJVMConfiguration(logfile);
-        PreUnifiedG1GCParser parser = new PreUnifiedG1GCParser(jvmConfiguration.getDiary(), testResults);
+        Diarizer jvmConfiguration = getJVMConfiguration(logfile);
+        PreUnifiedG1GCParser parser = new PreUnifiedG1GCParser();
+        TestResults testResults = new TestResults();
+        parser.publishTo(testResults);
+        parser.diary(jvmConfiguration.getDiary());
         logfile.stream().map(String::trim).forEach(parser::receive);
         return testResults;
     }
@@ -157,7 +181,7 @@ public abstract class ParserTest {
     /**
      * Setups an array of counts that is indexed by the type of GC event.
      */
-    class TestResults implements JVMEventConsumer {
+    class TestResults implements JVMEventChannel {
 
         private final int[] counts = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 , 0, 0, 0, 0, 0};
         private int metaSpaceRecordCount = 0;
@@ -178,12 +202,17 @@ public abstract class ParserTest {
             return metaSpaceRecordCount;
         }
 
+        @Override
+        public void registerListener(JVMEventChannelListener listener) {
+            throw new IllegalStateException("Listener not used for testing");
+        }
+
         /**
          * Counts by the type of the incoming event.
          * @param event
          */
         @Override
-        public void record(JVMEvent event) {
+        public void publish(ChannelName channel, JVMEvent event) {
             if (!(event instanceof JVMTermination)) {
                 GCEvent gcEvent = (GCEvent) event;
                 int index = collectorNameMapping.get(gcEvent.getGarbageCollectionType());
@@ -193,6 +222,11 @@ public abstract class ParserTest {
                         metaSpaceRecordCount++;
                 }
             }
+        }
+
+        @Override
+        public void close() {
+
         }
     }
 }

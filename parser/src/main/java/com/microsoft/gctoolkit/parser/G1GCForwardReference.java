@@ -4,8 +4,10 @@ package com.microsoft.gctoolkit.parser;
 
 import com.microsoft.gctoolkit.event.GCCause;
 import com.microsoft.gctoolkit.event.GarbageCollectionTypes;
+import com.microsoft.gctoolkit.event.MalformedEvent;
 import com.microsoft.gctoolkit.event.MemoryPoolSummary;
 import com.microsoft.gctoolkit.event.ReferenceGCSummary;
+import com.microsoft.gctoolkit.event.RegionSummary;
 import com.microsoft.gctoolkit.event.SurvivorMemoryPoolSummary;
 import com.microsoft.gctoolkit.event.UnifiedCountSummary;
 import com.microsoft.gctoolkit.event.UnifiedStatisticalSummary;
@@ -17,6 +19,7 @@ import com.microsoft.gctoolkit.event.g1gc.ConcurrentScanRootRegion;
 import com.microsoft.gctoolkit.event.g1gc.G1Cleanup;
 import com.microsoft.gctoolkit.event.g1gc.G1ConcurrentMark;
 import com.microsoft.gctoolkit.event.g1gc.G1ConcurrentRebuildRememberedSets;
+import com.microsoft.gctoolkit.event.g1gc.G1ConcurrentUndoCycle;
 import com.microsoft.gctoolkit.event.g1gc.G1FullGC;
 import com.microsoft.gctoolkit.event.g1gc.G1FullGCNES;
 import com.microsoft.gctoolkit.event.g1gc.G1GCConcurrentEvent;
@@ -35,73 +38,77 @@ import java.util.logging.Logger;
 import java.util.stream.Stream;
 
 
-public class G1GCForwardReference extends ForwardReference {
+class G1GCForwardReference extends ForwardReference {
 
     private static final Logger LOGGER = Logger.getLogger(G1GCForwardReference.class.getName());
 
-    private static int heapRegionSize = 0;
-    private static long minHeapSize;
-    private static long initialHeapSize;
-    private static long maxHeapSize;
+    private int heapRegionSize = 0;
+    private long minHeapSize;
+    private long initialHeapSize;
+    private long maxHeapSize;
+    private DateTimeStamp concurrentCycleStartTime;
 
-    public static void setHeapRegionSize(int sizeInMegaBytes) {
+    void setHeapRegionSize(int sizeInMegaBytes) {
         heapRegionSize = sizeInMegaBytes;
     }
 
-    public static int getHeapRegionSize() {
+    int getHeapRegionSize() {
         return heapRegionSize;
     }
 
     private GarbageCollectionTypes pausePhaseDuringConcurrentCycle = null;
     private GarbageCollectionTypes gcType = null;
+    private GarbageCollectionTypes concurrentPhase;
 
-    public G1GCForwardReference(Decorators decorators, int gcID) {
+    G1GCForwardReference(Decorators decorators, int gcID) {
         super(decorators, gcID);
     }
 
-    public boolean isConcurrentCycle() {
+    boolean isConcurrentCycle() {
         return gcType == GarbageCollectionTypes.Concurrent_Cycle;
     }
 
     //bag of stuff to maybe eliminate
-    public static void setMinHeapSize(long minHeapSize) {
-        G1GCForwardReference.minHeapSize = minHeapSize;
+    void setMinHeapSize(long minHeapSize) {
+        this.minHeapSize = minHeapSize;
     }
 
-    public static long getMinHeapSize() {
+    long getMinHeapSize() {
         return minHeapSize;
     }
 
-    public static void setInitialHeapSize(long initialHeapSize) {
-        G1GCForwardReference.initialHeapSize = initialHeapSize;
+    void setInitialHeapSize(long initialHeapSize) {
+        this.initialHeapSize = initialHeapSize;
     }
 
-    public static long getInitialHeapSize() {
+    long getInitialHeapSize() {
         return initialHeapSize;
     }
 
-    public static void setMaxHeapSize(long maxHeapSize) {
-        G1GCForwardReference.maxHeapSize = maxHeapSize;
+    void setMaxHeapSize(long maxHeapSize) {
+        this.maxHeapSize = maxHeapSize;
     }
 
-    public static long getMaxHeapSize() {
+    long getMaxHeapSize() {
         return maxHeapSize;
     }
 
-    public void setGcType(GarbageCollectionTypes garbageCollectionType) {
+    void setGcType(GarbageCollectionTypes garbageCollectionType) {
         if ((this.gcType != null) && (gcType != garbageCollectionType)) {
             throw new IllegalArgumentException("attempting to redefine GC Type from" + this.gcType + " to " + garbageCollectionType);
         }
         gcType = garbageCollectionType;
     }
 
-    private GarbageCollectionTypes concurrentPhase;
+    GarbageCollectionTypes getGcType() {
+        return gcType;
+    }
 
-    public void setConcurrentPhase(GarbageCollectionTypes phase) {
+    void setConcurrentPhase(GarbageCollectionTypes phase) {
         this.concurrentPhase = phase;
     }
 
-    public GarbageCollectionTypes getConcurrentPhase() {
+    GarbageCollectionTypes getConcurrentPhase() {
         return concurrentPhase;
     }
 
@@ -124,7 +131,7 @@ public class G1GCForwardReference extends ForwardReference {
     private static final int YOUNG_OCCUPANCY_BEFORE_COLLECTION = 12;
     private static final int YOUNG_OCCUPANCY_AFTER_COLLECTION = 13;
     private static final int YOUNG_SIZE_BEFORE_COLLECTION = 14;
-    private static final int YOUNG__SIZE_AFTER_COLLECTION = 15;
+    private static final int YOUNG_SIZE_AFTER_COLLECTION = 15;
     private static final int OLD_OCCUPANCY_BEFORE_COLLECTION = 16;
     private static final int OLD_OCCUPANCY_AFTER_COLLECTION = 17;
     private static final int OLD_SIZE_BEFORE_COLLECTION = 18;
@@ -171,202 +178,203 @@ public class G1GCForwardReference extends ForwardReference {
         return false;
     }
 
-    public boolean setHeapOccupancyBeforeCollection(long value) {
+
+    boolean setHeapOccupancyBeforeCollection(long value) {
         return setMemoryPoolMeasurement(HEAP_OCCUPANCY_BEFORE_COLLECTION, value);
     }
 
-    public boolean setHeapOccupancyAfterCollection(long value) {
+    boolean setHeapOccupancyAfterCollection(long value) {
         return setMemoryPoolMeasurement(HEAP_OCCUPANCY_AFTER_COLLECTION, value);
     }
 
-    public boolean setHeapSizeBeforeCollection(long value) {
+    boolean setHeapSizeBeforeCollection(long value) {
         return setMemoryPoolMeasurement(HEAP_SIZE_BEFORE_COLLECTION, value);
     }
 
-    public boolean setHeapSizeAfterCollection(long value) {
+    boolean setHeapSizeAfterCollection(long value) {
         return setMemoryPoolMeasurement(HEAP_SIZE_AFTER_COLLECTION, value);
     }
 
-    public boolean setEdenOccupancyBeforeCollection(long value) {
+    boolean setEdenOccupancyBeforeCollection(long value) {
         return setMemoryPoolMeasurement(EDEN_OCCUPANCY_BEFORE_COLLECTION, value);
     }
 
-    public boolean setEdenOccupancyAfterCollection(long value) {
+    boolean setEdenOccupancyAfterCollection(long value) {
         return setMemoryPoolMeasurement(EDEN_OCCUPANCY_AFTER_COLLECTION, value);
     }
 
-    public boolean setEdenSizeBeforeCollection(long value) {
+    boolean setEdenSizeBeforeCollection(long value) {
         return setMemoryPoolMeasurement(EDEN_SIZE_BEFORE_COLLECTION, value);
     }
 
-    public boolean setEdenSizeAfterCollection(long value) {
+    boolean setEdenSizeAfterCollection(long value) {
         return setMemoryPoolMeasurement(EDEN_SIZE_AFTER_COLLECTION, value);
     }
 
-    public boolean setSurvivorOccupancyBeforeCollection(long value) {
+    boolean setSurvivorOccupancyBeforeCollection(long value) {
         return setMemoryPoolMeasurement(SURVIVOR_OCCUPANCY_BEFORE_COLLECTION, value);
     }
 
-    public boolean setSurvivorOccupancyAfterCollection(long value) {
+    boolean setSurvivorOccupancyAfterCollection(long value) {
         return setMemoryPoolMeasurement(SURVIVOR_OCCUPANCY_AFTER_COLLECTION, value);
     }
 
-    public boolean setSurvivorSizeBeforeCollection(long value) {
+    boolean setSurvivorSizeBeforeCollection(long value) {
         return setMemoryPoolMeasurement(SURVIVOR_SIZE_BEFORE_COLLECTION, value);
     }
 
-    public boolean setSurvivorSizeAfterCollection(long value) {
+    boolean setSurvivorSizeAfterCollection(long value) {
         return setMemoryPoolMeasurement(SURVIVOR_SIZE_AFTER_COLLECTION, value);
     }
 
-    public boolean setYoungOccupancyBeforeCollection(long value) {
+    boolean setYoungOccupancyBeforeCollection(long value) {
         return setMemoryPoolMeasurement(YOUNG_OCCUPANCY_BEFORE_COLLECTION, value);
     }
 
-    public boolean setYoungOccupancyAfterCollection(long value) {
+    boolean setYoungOccupancyAfterCollection(long value) {
         return setMemoryPoolMeasurement(YOUNG_OCCUPANCY_AFTER_COLLECTION, value);
     }
 
-    public boolean setYoungSizeBeforeCollection(long value) {
+    boolean setYoungSizeBeforeCollection(long value) {
         return setMemoryPoolMeasurement(YOUNG_SIZE_BEFORE_COLLECTION, value);
     }
 
-    public boolean setYoungSizeAfterCollection(long value) {
-        return setMemoryPoolMeasurement(YOUNG__SIZE_AFTER_COLLECTION, value);
+    boolean setYoungSizeAfterCollection(long value) {
+        return setMemoryPoolMeasurement(YOUNG_SIZE_AFTER_COLLECTION, value);
     }
 
-    public boolean setOldOccupancyBeforeCollection(long value) {
+    boolean setOldOccupancyBeforeCollection(long value) {
         return setMemoryPoolMeasurement(OLD_OCCUPANCY_BEFORE_COLLECTION, value);
     }
 
-    public boolean setOldOccupancyAfterCollection(long value) {
+    boolean setOldOccupancyAfterCollection(long value) {
         return setMemoryPoolMeasurement(OLD_OCCUPANCY_AFTER_COLLECTION, value);
     }
 
-    public boolean setOldSizeBeforeCollection(long value) {
+    boolean setOldSizeBeforeCollection(long value) {
         return setMemoryPoolMeasurement(OLD_SIZE_BEFORE_COLLECTION, value);
     }
 
-    public boolean setOldSizeAfterCollection(long value) {
+    boolean setOldSizeAfterCollection(long value) {
         return setMemoryPoolMeasurement(OLD_SIZE_AFTER_COLLECTION, value);
     }
 
-    public boolean setHumongousOccupancyBeforeCollection(long value) {
+    boolean setHumongousOccupancyBeforeCollection(long value) {
         return setMemoryPoolMeasurement(HUMONGOUS_OCCUPANCY_BEFORE_COLLECTION, value);
     }
 
-    public boolean setHumongousOccupancyAfterCollection(long value) {
+    boolean setHumongousOccupancyAfterCollection(long value) {
         return setMemoryPoolMeasurement(HUMONGOUS_OCCUPANCY_AFTER_COLLECTION, value);
     }
 
-    public boolean setHumongousSizeBeforeCollection(long value) {
+    boolean setHumongousSizeBeforeCollection(long value) {
         return setMemoryPoolMeasurement(HUMONGOUS_SIZE_BEFORE_COLLECTION, value);
     }
 
-    public boolean setHumongousSizeAfterCollection(long value) {
+    boolean setHumongousSizeAfterCollection(long value) {
         return setMemoryPoolMeasurement(HUMONGOUS_SIZE_AFTER_COLLECTION, value);
     }
 
-    public boolean setMetaspaceOccupancyBeforeCollection(long value) {
+    boolean setMetaspaceOccupancyBeforeCollection(long value) {
         return setMemoryPoolMeasurement(METASPACE_OCCUPANCY_BEFORE_COLLECTION, value);
     }
 
-    public boolean setMetaspaceOccupancyAfterCollection(long value) {
+    boolean setMetaspaceOccupancyAfterCollection(long value) {
         return setMemoryPoolMeasurement(METASPACE_OCCUPANCY_AFTER_COLLECTION, value);
     }
 
-    public boolean setMetaspaceSizeBeforeCollection(long value) {
+    boolean setMetaspaceSizeBeforeCollection(long value) {
         return setMemoryPoolMeasurement(METASPACE_SIZE_BEFORE_COLLECTION, value);
     }
 
-    public boolean setMetaspaceSizeAfterCollection(long value) {
+    boolean setMetaspaceSizeAfterCollection(long value) {
         return setMemoryPoolMeasurement(METASPACE_SIZE_AFTER_COLLECTION, value);
     }
 
-    public boolean setMetaspaceCommittedBeforeCollection(long value) {
+    boolean setMetaspaceCommittedBeforeCollection(long value) {
         return setMemoryPoolMeasurement(METASPACE_COMMITTED_BEFORE_COLLECTION, value);
     }
 
-    public boolean setMetaspaceCommittedAfterCollection(long value) {
+    boolean setMetaspaceCommittedAfterCollection(long value) {
         return setMemoryPoolMeasurement(METASPACE_COMMITTED_AFTER_COLLECTION, value);
     }
 
-    public boolean setMetaspaceReservedBeforeCollection(long value) {
+    boolean setMetaspaceReservedBeforeCollection(long value) {
         return setMemoryPoolMeasurement(METASPACE_RESERVED_BEFORE_COLLECTION, value);
     }
 
-    public boolean setMetaspaceReservedAfterCollection(long value) {
+    boolean setMetaspaceReservedAfterCollection(long value) {
         return setMemoryPoolMeasurement(METASPACE_RESERVED_AFTER_COLLECTION, value);
     }
 
-    public boolean setClassspaceOccupancyBeforeCollection(long value) {
+    boolean setClassspaceOccupancyBeforeCollection(long value) {
         return setMemoryPoolMeasurement(CLASSSPACE_OCCUPANCY_BEFORE_COLLECTION, value);
     }
 
-    public boolean setClassspaceOccupancyAfterCollection(long value) {
+    boolean setClassspaceOccupancyAfterCollection(long value) {
         return setMemoryPoolMeasurement(CLASSSPACE_OCCUPANCY_AFTER_COLLECTION, value);
     }
 
-    public boolean setClassspaceSizeBeforeCollection(long value) {
+    boolean setClassspaceSizeBeforeCollection(long value) {
         return setMemoryPoolMeasurement(CLASSSPACE_SIZE_BEFORE_COLLECTION, value);
     }
 
-    public boolean setClassspaceSizeAfterCollection(long value) {
+    boolean setClassspaceSizeAfterCollection(long value) {
         return setMemoryPoolMeasurement(CLASSSPACE_SIZE_AFTER_COLLECTION, value);
     }
 
-    public boolean setClassspaceCommittedBeforeCollection(long value) {
+    boolean setClassspaceCommittedBeforeCollection(long value) {
         return setMemoryPoolMeasurement(CLASSSPACE_COMMITTED_BEFORE_COLLECTION, value);
     }
 
-    public boolean setClassspaceCommittedAfterCollection(long value) {
+    boolean setClassspaceCommittedAfterCollection(long value) {
         return setMemoryPoolMeasurement(CLASSSPACE_COMMITTED_AFTER_COLLECTION, value);
     }
 
-    public boolean setClassspaceReservedBeforeCollection(long value) {
+    boolean setClassspaceReservedBeforeCollection(long value) {
         return setMemoryPoolMeasurement(CLASSSPACE_RESERVED_BEFORE_COLLECTION, value);
     }
 
-    public boolean setClassspaceReservedAfterCollection(long value) {
+    boolean setClassspaceReservedAfterCollection(long value) {
         return setMemoryPoolMeasurement(CLASSSPACE_RESERVED_AFTER_COLLECTION, value);
     }
 
     // ******
     // Reference processing
-    static final int SOFT_REFERENCE = 0;
-    static final int WEAK_REFERENCE = 1;
-    static final int PHANTOM_REFERENCE = 2;
-    static final int FINAL_REFERENCE = 3;
-    static final int JNI_WEAK_REFERENCE = 4;
-    static final int CLEANER_REFERENCE = 5;
+    private static final int SOFT_REFERENCE = 0;
+    private static final int WEAK_REFERENCE = 1;
+    private static final int PHANTOM_REFERENCE = 2;
+    private static final int FINAL_REFERENCE = 3;
+    private static final int JNI_WEAK_REFERENCE = 4;
+    private static final int CLEANER_REFERENCE = 5;
     private double[] referenceProcessingDuarations = {-1.0d, -1.0d, -1.0d, -1.0d, -1.0d, -1.0d};
     private int[] referenceCounts = {-1, -1, -1, -1, -1, -1};
 
-    public void setSoftReferenceProcessingDuation(double duration) {
+    void setSoftReferenceProcessingDuation(double duration) {
         referenceProcessingDuarations[SOFT_REFERENCE] = duration;
     }
 
-    public void setWeakReferenceProcessingDuration(double duration) {
+    void setWeakReferenceProcessingDuration(double duration) {
         referenceProcessingDuarations[WEAK_REFERENCE] = duration;
     }
 
-    public void setPhantomReferenceProcessingDuration(double duration) {
+    void setPhantomReferenceProcessingDuration(double duration) {
         referenceProcessingDuarations[PHANTOM_REFERENCE] = duration;
     }
 
-    public void setFinalReferenceProcessingDuration(double duration) {
+    void setFinalReferenceProcessingDuration(double duration) {
         referenceProcessingDuarations[FINAL_REFERENCE] = duration;
     }
 
-    public void setJniWeakReferenceProcessingDuration(double duration) {
+    void setJniWeakReferenceProcessingDuration(double duration) {
         referenceProcessingDuarations[JNI_WEAK_REFERENCE] = duration;
     }
 
-    public void setCleanerReferenceProcessingDuration(double duration) {
+    void setCleanerReferenceProcessingDuration(double duration) {
         referenceProcessingDuarations[CLEANER_REFERENCE] = duration;
     }
 
-    public void setReferenceCounts(int soft, int weak, int finalReferenceCount, int phantom) {
+    void setReferenceCounts(int soft, int weak, int finalReferenceCount, int phantom) {
         referenceCounts[WEAK_REFERENCE] = weak;
         referenceCounts[SOFT_REFERENCE] = soft;
         referenceCounts[PHANTOM_REFERENCE] = phantom;
@@ -392,91 +400,91 @@ public class G1GCForwardReference extends ForwardReference {
     // Young phases
     private static final double NOT_SET = -1.0d;
 
-    public static final int PRE_EVACUATE_COLLECTION_SET = 0;
-    public static final int EVACUATE_COLLECTION_SET = 1;
-    public static final int POST_EVACUATE_COLLECTION_SET = 2;
-    public static final int OTHER = 3;
+    static final int PRE_EVACUATE_COLLECTION_SET = 0;
+    static final int EVACUATE_COLLECTION_SET = 1;
+    static final int POST_EVACUATE_COLLECTION_SET = 2;
+    static final int OTHER = 3;
 
     private final double[] youngCollectionPhases = {NOT_SET, NOT_SET, NOT_SET, NOT_SET};
     private final Map<String, Double> preEvacuateCSetPhaseDurations = new ConcurrentHashMap<>(3);
     private final Map<String, UnifiedStatisticalSummary> evacuateCSetPhaseDurations = new ConcurrentHashMap<>();
     private final Map<String, Double> postEvacuateCSetPhaseDurations = new ConcurrentHashMap<>();
 
-    public void setPreEvacuateCSetDuration(double duration) {
+    void setPreEvacuateCSetDuration(double duration) {
         this.youngCollectionPhases[PRE_EVACUATE_COLLECTION_SET] = duration;
     }
 
-    public void recordPreEvacuateCSetPhaseDuration(String phase, double duration) {
+    void postPreEvacuateCSetPhaseDuration(String phase, double duration) {
         preEvacuateCSetPhaseDurations.put(phase, duration);
     }
 
-    public Stream<String> preEvacuateCSetPhaseNames() {
+    Stream<String> preEvacuateCSetPhaseNames() {
         return preEvacuateCSetPhaseDurations.keySet().stream();
     }
 
-    public double preEvacuateCSetPhaseDuration(String phaseName) {
+    double preEvacuateCSetPhaseDuration(String phaseName) {
         return preEvacuateCSetPhaseDurations.get(phaseName);
     }
 
-    public void setEvacuationCSetDuration(double duration) {
+    void setEvacuationCSetDuration(double duration) {
         this.youngCollectionPhases[EVACUATE_COLLECTION_SET] = duration;
     }
 
-    public void recordEvacuateCSetPhaseDuration(String phase, UnifiedStatisticalSummary stats) {
+    void postEvacuateCSetPhaseDuration(String phase, UnifiedStatisticalSummary stats) {
         evacuateCSetPhaseDurations.put(phase, stats);
     }
 
-    public Stream<String> evacuateCSetPhaseNames() {
+    Stream<String> evacuateCSetPhaseNames() {
         return evacuateCSetPhaseDurations.keySet().stream();
     }
 
-    public UnifiedStatisticalSummary evacuateCSetPhaseDuration(String phaseName) {
+    UnifiedStatisticalSummary evacuateCSetPhaseDuration(String phaseName) {
         return evacuateCSetPhaseDurations.get(phaseName);
     }
 
-    public void setPostEvacuateCSetDuration(double duration) {
+    void setPostEvacuateCSetDuration(double duration) {
         this.youngCollectionPhases[POST_EVACUATE_COLLECTION_SET] = duration;
     }
 
-    public void recordPostEvacuateCSetPhaseDuration(String phase, double duration) {
+    void postPostEvacuateCSetPhaseDuration(String phase, double duration) {
         postEvacuateCSetPhaseDurations.put(phase, duration);
     }
 
-    public Stream<String> postEvacuateCSetPhaseNames() {
+    Stream<String> postEvacuateCSetPhaseNames() {
         return postEvacuateCSetPhaseDurations.keySet().stream();
     }
 
-    public double postEvacuateCSetPhaseDuration(String phaseName) {
+    double postEvacuateCSetPhaseDuration(String phaseName) {
         return postEvacuateCSetPhaseDurations.get(phaseName);
     }
 
-    public void setOtherDuration(double duration) {
+    void setOtherDuration(double duration) {
         this.youngCollectionPhases[OTHER] = duration;
     }
 
     private UnifiedCountSummary unifiedCountSummary = null;
 
-    public void setProcessedBuffersSummary(UnifiedCountSummary summary) {
+    void setProcessedBuffersSummary(UnifiedCountSummary summary) {
         unifiedCountSummary = summary;
     }
 
     private UnifiedCountSummary terminationAttempts = null;
 
-    public void setTerminationAttempts(UnifiedCountSummary summary) {
+    void setTerminationAttempts(UnifiedCountSummary summary) {
         this.terminationAttempts = summary;
     }
 
     //
     private boolean toSpaceExhausted = false;
 
-    public void toSpaceExhausted() {
+    void toSpaceExhausted() {
         toSpaceExhausted = true;
     }
 
     private int evacuationWorkersUsed = 0;
     private int evacuationWorkersAvailable = 0;
 
-    public void evacuationWorkers(int workersUsed, int available) {
+    void evacuationWorkers(int workersUsed, int available) {
         this.evacuationWorkersUsed = workersUsed;
         this.evacuationWorkersAvailable = available;
     }
@@ -485,7 +493,7 @@ public class G1GCForwardReference extends ForwardReference {
     private int concurrentMarkWorkersUsed = 0;
     private int concurrentMarkWorkersAvailable = 0;
 
-    public void concurrentMarkWorkers(int used, int available) {
+    void concurrentMarkWorkers(int used, int available) {
         this.concurrentMarkWorkersUsed = used;
         this.concurrentMarkWorkersAvailable = available;
     }
@@ -493,17 +501,17 @@ public class G1GCForwardReference extends ForwardReference {
     private double markFromRootsDuration = -1.0d;
     private double precleanDuration = -1.0d;
 
-    public void setMarkFromRootsDuration(double duration) {
+    void setMarkFromRootsDuration(double duration) {
         this.markFromRootsDuration = duration;
     }
 
-    public void setPrecleanDuration(double duration) {
+    void setPrecleanDuration(double duration) {
         this.precleanDuration = duration;
     }
 
     private boolean aborted = false;
 
-    public void abortConcurrentMark() {
+    void abortConcurrentMark() {
         aborted = true;
     }
 
@@ -536,6 +544,7 @@ public class G1GCForwardReference extends ForwardReference {
         SurvivorMemoryPoolSummary survivor = getSurvivorMemoryPoolSummary();
         MemoryPoolSummary tenured = getMemoryPoolSummary(OLD_OCCUPANCY_BEFORE_COLLECTION);
         MemoryPoolSummary humongous = getMemoryPoolSummary(HUMONGOUS_OCCUPANCY_BEFORE_COLLECTION);
+        collection.addHeapRegionSize(heapRegionSize);
         if (heap != null && eden != null && survivor != null) {
             collection.addMemorySummary(eden, survivor, heap);
         } else if (eden == null && survivor == null && heap != null) {
@@ -558,6 +567,77 @@ public class G1GCForwardReference extends ForwardReference {
         collection.addPermOrMetaSpaceRecord(getMemoryPoolSummary(METASPACE_OCCUPANCY_BEFORE_COLLECTION));
     }
 
+
+    enum REGIONS {
+        EDEN,
+        SURVIVOR,
+        OLD,
+        HUMONGOUS,
+        ARCHIVE;
+    }
+
+    private final RegionSummary[] regionSummaries = new RegionSummary[REGIONS.values().length];
+    
+    void setEdenRegionSummary(RegionSummary summary) {
+        regionSummaries[REGIONS.EDEN.ordinal()] = summary;
+        if (heapRegionSize > 0) {
+            setEdenOccupancyBeforeCollection(summary.getBefore() * heapRegionSize * 1024L);
+            setEdenOccupancyAfterCollection(summary.getAfter() * heapRegionSize * 1024L);
+            setEdenSizeBeforeCollection(summary.getBefore() * heapRegionSize * 1024L);
+            setEdenSizeAfterCollection(summary.getAssigned() * heapRegionSize * 1024L);
+        }
+    }
+
+    void setSurvivorRegionSummary(RegionSummary summary) {
+        regionSummaries[REGIONS.SURVIVOR.ordinal()] = summary;
+        if (heapRegionSize > 0) {
+            setSurvivorOccupancyBeforeCollection(summary.getBefore() * heapRegionSize * 1024L);
+            setSurvivorOccupancyAfterCollection(summary.getAfter() * heapRegionSize * 1024L);
+            setSurvivorSizeBeforeCollection(summary.getBefore() * heapRegionSize * 1024L);
+            setSurvivorSizeAfterCollection(summary.getAssigned() * heapRegionSize * 1024L);
+        }
+    }
+
+    void setOldRegionSummary(RegionSummary summary) {
+        regionSummaries[REGIONS.OLD.ordinal()] = summary;
+        if (heapRegionSize > 0) {
+            setOldOccupancyBeforeCollection(summary.getBefore() * heapRegionSize * 1024L);
+            setOldOccupancyAfterCollection(summary.getAfter() * heapRegionSize * 1024L);
+            setOldSizeBeforeCollection(summary.getBefore() * heapRegionSize * 1024L);
+            setOldSizeAfterCollection(summary.getAfter() * heapRegionSize * 1024L);
+        }
+    }
+
+    void setHumongousRegionSummary(RegionSummary summary) {
+        regionSummaries[REGIONS.HUMONGOUS.ordinal()] = summary;
+        if (heapRegionSize > 0) {
+            setHumongousOccupancyBeforeCollection(summary.getBefore() * heapRegionSize * 1024L);
+            setHumongousOccupancyAfterCollection(summary.getAfter() * heapRegionSize * 1024L);
+            setHumongousSizeBeforeCollection(summary.getBefore() * heapRegionSize * 1024L);
+            setHumongousSizeAfterCollection(summary.getAfter() * heapRegionSize * 1024L);
+        }
+    }
+
+    void setArchiveRegionSummary(RegionSummary summary) {
+        regionSummaries[REGIONS.ARCHIVE.ordinal()] = summary;
+        if (heapRegionSize > 0) {
+            setArchiveOccupancyBeforeCollection(summary.getBefore() * heapRegionSize * 1024);
+            setArchiveOccupancyAfterCollection(summary.getAfter() * heapRegionSize * 1024);
+            setArchiveSizeBeforeCollection(summary.getBefore() * heapRegionSize * 1024);
+            setArchiveSizeAfterCollection(summary.getAfter() * heapRegionSize * 1024);
+        }
+    }
+
+    private void fillInRegionSummary(G1GCPauseEvent collection) {
+        collection.addRegionSummary(
+                regionSummaries[REGIONS.EDEN.ordinal()],
+                regionSummaries[REGIONS.SURVIVOR.ordinal()],
+                regionSummaries[REGIONS.OLD.ordinal()],
+                regionSummaries[REGIONS.HUMONGOUS.ordinal()],
+                regionSummaries[REGIONS.ARCHIVE.ordinal()]
+        );
+    }
+
     private void fullInInternalPhases(G1FullGC collection) {
         int index = 0;
         String key;
@@ -577,36 +657,41 @@ public class G1GCForwardReference extends ForwardReference {
         postEvacuateCSetPhaseNames().forEach(name -> collection.addPostEvacuationCollectionPhase(name, postEvacuateCSetPhaseDuration(name)));
     }
 
+    private void fillInWorkers(G1Young collection) {
+        collection.setEvacuationWorkersUsed(evacuationWorkersUsed);
+        collection.setEvacuationWorkersAvailable(evacuationWorkersAvailable);
+    }
+
     private DateTimeStamp pausePhaseDuringConcurrentCycleTime = null;
     private double pausePhaseDuringConcurrentCycleDuration = -1.0d;
 
-    public void pausePhaseDuringConcurrentCycle(GarbageCollectionTypes pausePhase) {
+    void pausePhaseDuringConcurrentCycle(GarbageCollectionTypes pausePhase) {
         this.pausePhaseDuringConcurrentCycle = pausePhase;
     }
 
-    public void pausePhaseDuringConcurrentCycleStart(DateTimeStamp clock) {
+    void pausePhaseDuringConcurrentCycleStart(DateTimeStamp clock) {
         pausePhaseDuringConcurrentCycleTime = clock;
     }
 
-    public void pausePhaseDuringConcurrentCycleDuration(double duration) {
+    void pausePhaseDuringConcurrentCycleDuration(double duration) {
         pausePhaseDuringConcurrentCycleDuration = duration;
     }
 
     private double finalizeMarkingDuration = -1.0d;
     private double systemDictionaryUnloadingDuration = -1.0d;
 
-    public void finalizeMarkingDuration(double duration) {
+    void finalizeMarkingDuration(double duration) {
         this.finalizeMarkingDuration = duration;
     }
 
-    public void systemDictionaryUnloadingDuration(double duration) {
+    void systemDictionaryUnloadingDuration(double duration) {
         this.systemDictionaryUnloadingDuration = duration;
     }
 
     private int stringTableProcessed = -1;
     private int stringTableRemoved = -1;
 
-    public void stringTableProcessedAndRemoved(int processed, int removed) {
+    void stringTableProcessedAndRemoved(int processed, int removed) {
         this.stringTableProcessed = processed;
         this.stringTableRemoved = removed;
     }
@@ -614,18 +699,18 @@ public class G1GCForwardReference extends ForwardReference {
     private int symbolTableProcessed = -1;
     private int symbolTableRemoved = -1;
 
-    public void symbolTableProcessedAndRemoved(int processed, int removed) {
+    void symbolTableProcessedAndRemoved(int processed, int removed) {
         this.symbolTableProcessed = processed;
         this.symbolTableRemoved = removed;
     }
 
     private double parallelUnloadingDuration = -1.0d;
 
-    public void parallelUnloadingDuration(double duration) {
+    void parallelUnloadingDuration(double duration) {
         this.parallelUnloadingDuration = duration;
     }
 
-    public G1GCConcurrentEvent buildConcurrentEvent() {
+    G1GCConcurrentEvent buildConcurrentPhaseEvent() {
         switch (getConcurrentPhase()) {
             case ConcurrentClearClaimedMarks:
                 return new ConcurrentClearClaimedMarks(getStartTime(), getDuration());
@@ -647,14 +732,17 @@ public class G1GCForwardReference extends ForwardReference {
         return null;
     }
 
+    G1GCConcurrentEvent buildConcurrentUndoCycleEvent() {
+        return new G1ConcurrentUndoCycle(getConcurrentCycleStartTime(), getDuration());
+    }
+
     /**
      * gcType == null -> likely an incomplete record.
      * @return
      */
-    G1GCPauseEvent buildEvent() {
+    G1GCPauseEvent buildEvent() throws MalformedEvent {
         if (gcType == null ) {
-            LOGGER.warning("GC Event is undefined (null)");
-            throw new IllegalStateException("G1GC Event type is undefined (null): " + this.toString());
+            throw new MalformedEvent("G1GC Event type is undefined (null): " + this.toString());
         }
         switch (this.gcType) {
             case Young:
@@ -672,19 +760,25 @@ public class G1GCForwardReference extends ForwardReference {
                     case G1GCCleanup:
                         return buildCleanup();
                     default:
-                        LOGGER.warning("Unrecognized (mostly) Concurrent Cycle Pause Event " + getConcurrentPhase());
+                        throw new MalformedEvent("Unrecognized (mostly) Concurrent Cycle Pause Event " + getConcurrentPhase());
                 }
+            case G1GCConcurrentUndoCycle:
+                // gctype is likely incorrectly set in the forward reference. The plan is to specialize the forward
+                // references thus allowing this event to be built here rather than in a specialized method.
+                // The phase is a reset that occurs after an eager collection of humongous regions. This event will be
+                // filled in a future PR.
                 return null;
             default:
-                LOGGER.warning("Unrecognized Event " + gcType);
-                return null;
+                throw new MalformedEvent("Unrecognized Event " + gcType);
         }
     }
 
     private G1Young buildYoung(G1Young collection) {
         fillInMemoryPoolStats(collection);
+        fillInRegionSummary(collection);
         fillInMetaspaceStats(collection);
         fillInPhases(collection);
+        fillInWorkers(collection);
         if (toSpaceExhausted) collection.toSpaceExhausted();
         if (hasReferenceGCSummary())
             collection.add(generateReferenceGCSummary());
@@ -762,6 +856,7 @@ public class G1GCForwardReference extends ForwardReference {
         //collection.classUnloading()  todo: fill in
         fillInMemoryPoolStats(collection);
         fullInInternalPhases(collection);
+        fillInRegionSummary(collection);
         if (hasReferenceGCSummary())
             collection.add(generateReferenceGCSummary());
         collection.addCPUSummary(getCPUSummary());
@@ -771,7 +866,7 @@ public class G1GCForwardReference extends ForwardReference {
     private final Map<String, Double> fullGCInternalPhases = new ConcurrentHashMap<>();
     private final Map<Integer, String> fullGCInternalPhaseOrder = new ConcurrentHashMap<>();
 
-    public void fullPhase(int integerGroup, String fullGCInternalPhase, double duration) {
+    void fullPhase(int integerGroup, String fullGCInternalPhase, double duration) {
         fullGCInternalPhaseOrder.put(integerGroup, fullGCInternalPhase);
         fullGCInternalPhases.put(fullGCInternalPhase, duration);
     }
@@ -785,19 +880,27 @@ public class G1GCForwardReference extends ForwardReference {
         return getStartTime().toString() + " : " + ((gcType == null) ? "null" : gcType.toString()) + " : " + ((getGCCause() == null) ? "null" : getGCCause().toString()) + " : " + getDuration();
     }
 
-    public boolean setArchiveOccupancyBeforeCollection(int value) {
+    boolean setArchiveOccupancyBeforeCollection(int value) {
         return setMemoryPoolMeasurement(ARCHIVE_OCCUPANCY_BEFORE_COLLECTION, value);
     }
 
-    public boolean setArchiveOccupancyAfterCollection(int value) {
+    boolean setArchiveOccupancyAfterCollection(int value) {
         return setMemoryPoolMeasurement(ARCHIVE_OCCUPANCY_AFTER_COLLECTION, value);
     }
 
-    public boolean setArchiveSizeBeforeCollection(int value) {
+    boolean setArchiveSizeBeforeCollection(int value) {
         return setMemoryPoolMeasurement(ARCHIVE_SIZE_BEFORE_COLLECTION, value);
     }
 
-    public boolean setArchiveSizeAfterCollection(int value) {
+    boolean setArchiveSizeAfterCollection(int value) {
         return setMemoryPoolMeasurement(ARCHIVE_SIZE_AFTER_COLLECTION, value);
+    }
+
+    void setConcurrentCycleStartTime(DateTimeStamp clock) {
+        this.concurrentCycleStartTime = clock;
+    }
+
+    DateTimeStamp getConcurrentCycleStartTime() {
+        return concurrentCycleStartTime;
     }
 }

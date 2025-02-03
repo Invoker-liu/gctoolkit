@@ -11,30 +11,71 @@ public class ShenandoahCycle extends GCEvent {
 
     private ERGO ergonomics;
 
+    /**
+     * @param timeStamp time of event
+     * @param gcType type of event
+     * @param cause reason for triggering event
+     * @param duration duration of the event
+     */
     public ShenandoahCycle(DateTimeStamp timeStamp, GarbageCollectionTypes gcType, GCCause cause, double duration) {
         super(timeStamp, gcType, cause, duration);
     }
 
+    /**
+     *
+     * @param timeStamp time of event
+     * @param duration duration of the event
+     */
     public ShenandoahCycle(DateTimeStamp timeStamp, double duration) {
         super(timeStamp, duration);
     }
 
+    /**
+     *
+     * @param timeStamp time of event
+     * @param cause reason for triggering event
+     * @param duration duration of the event
+     */
     public ShenandoahCycle(DateTimeStamp timeStamp, GCCause cause, double duration) {
         super(timeStamp, cause, duration);
     }
 
+    /**
+     *
+     * @param timeStamp time of event
+     * @param gcType type of event
+     * @param duration duration of the event
+     */
     public ShenandoahCycle(DateTimeStamp timeStamp, GarbageCollectionTypes gcType, double duration) {
         super(timeStamp, gcType, duration);
     }
 
     /**
+     *
      * @deprecated use setErgonomics(...) instead
+     * @param free memory after collection
+     * @param maxFree max free memory
+     * @param humongous allocations
+     * @param fragExternal fragmented memory outside of heap
+     * @param fragInternal fragmented memory inside heap
+     * @param reserve currently reserved memory
+     * @param maxReserve max reserved memory
      */
     @Deprecated(forRemoval = true)
     public void addErgonomics(int free, int maxFree, int humongous, double fragExternal, double fragInternal, int reserve, int maxReserve) {
         setErgonomics(free, maxFree, humongous, fragExternal, fragInternal, reserve, maxReserve);
     }
 
+    /**
+     *
+     * @param free memory after collection
+     * @param maxFree max free memory
+     * @param humongous allocations
+     * @param fragExternal fragmented memory outside of heap
+     * @param fragInternal fragmented memory inside heap
+     * @param reserve currently reserved memory
+     * @param maxReserve max reserved memory
+     */
     public void setErgonomics(int free, int maxFree, int humongous, double fragExternal, double fragInternal, int reserve, int maxReserve) {
         this.ergonomics = new ERGO(free, maxFree, humongous, fragExternal, fragInternal, reserve, maxReserve);
     }
@@ -53,6 +94,7 @@ public class ShenandoahCycle extends GCEvent {
         Concurrent_evacuation, Pause_Init_Update_Refs,
         Concurrent_update_references, Pause_Final_Update_Refs;
     }
+
 
     class Phase {
 
@@ -74,6 +116,16 @@ public class ShenandoahCycle extends GCEvent {
         private final int reserve;
         private final int maxReserve;
 
+        /**
+         *
+         * @param free memory after collection
+         * @param maxFree max free memory
+         * @param humongous allocations
+         * @param fragExternal fragmented memory outside of heap
+         * @param fragInternal fragmented memory inside heap
+         * @param reserve currently reserved memory
+         * @param maxReserve max reserved memory
+         */
         public ERGO(int free, int maxFree, int humongous, double fragExternal, double fragInternal, int reserve, int maxReserve) {
             this.free = free;
             this.maxFree = maxFree;
@@ -84,30 +136,58 @@ public class ShenandoahCycle extends GCEvent {
             this.maxReserve = maxReserve;
         }
 
+        /**
+         *
+         * @return free
+         */
         public int getFree() {
             return free;
         }
 
+        /**
+         *
+         * @return max free
+         */
         public int getMaxFree() {
             return maxFree;
         }
 
+        /**
+         *
+         * @return humongous count
+         */
         public int getHumongous() {
             return humongous;
         }
 
+        /**
+         *
+         * @return external fragmentation
+         */
         public double getFragExternal() {
             return fragExternal;
         }
 
+        /**
+         *
+         * @return internal fragmentation
+         */
         public double getFragInternal() {
             return fragInternal;
         }
 
+        /**
+         *
+         * @return reserve
+         */
         public int getReserve() {
             return reserve;
         }
 
+        /**
+         *
+         * @return return max reserve
+         */
         public int getMaxReserve() {
             return maxReserve;
         }

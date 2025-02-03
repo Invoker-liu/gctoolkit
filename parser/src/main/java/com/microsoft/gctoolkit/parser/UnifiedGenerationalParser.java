@@ -2,7 +2,9 @@
 // Licensed under the MIT License.
 package com.microsoft.gctoolkit.parser;
 
+import com.microsoft.gctoolkit.aggregator.EventSource;
 import com.microsoft.gctoolkit.event.CPUSummary;
+import com.microsoft.gctoolkit.event.GCCause;
 import com.microsoft.gctoolkit.event.GarbageCollectionTypes;
 import com.microsoft.gctoolkit.event.generational.AbortablePreClean;
 import com.microsoft.gctoolkit.event.generational.CMSConcurrentEvent;
@@ -14,22 +16,26 @@ import com.microsoft.gctoolkit.event.generational.ConcurrentReset;
 import com.microsoft.gctoolkit.event.generational.ConcurrentSweep;
 import com.microsoft.gctoolkit.event.generational.DefNew;
 import com.microsoft.gctoolkit.event.generational.FullGC;
+import com.microsoft.gctoolkit.event.generational.GenerationalGCEvent;
 import com.microsoft.gctoolkit.event.generational.GenerationalGCPauseEvent;
 import com.microsoft.gctoolkit.event.generational.InitialMark;
 import com.microsoft.gctoolkit.event.generational.PSFullGC;
 import com.microsoft.gctoolkit.event.generational.PSYoungGen;
 import com.microsoft.gctoolkit.event.generational.ParNew;
+import com.microsoft.gctoolkit.event.generational.SystemGC;
 import com.microsoft.gctoolkit.event.generational.YoungGC;
 import com.microsoft.gctoolkit.event.jvm.JVMTermination;
+import com.microsoft.gctoolkit.jvm.Diary;
+import com.microsoft.gctoolkit.message.ChannelName;
+import com.microsoft.gctoolkit.message.JVMEventChannel;
 import com.microsoft.gctoolkit.parser.collection.RuleSet;
 import com.microsoft.gctoolkit.parser.jvm.Decorators;
-import com.microsoft.gctoolkit.parser.jvm.LoggingDiary;
 import com.microsoft.gctoolkit.parser.unified.UnifiedGenerationalPatterns;
 
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Map;
-import java.util.Optional;
+import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -60,7 +66,6 @@ import static com.microsoft.gctoolkit.event.GarbageCollectionTypes.Remark;
 public class UnifiedGenerationalParser extends UnifiedGCLogParser implements UnifiedGenerationalPatterns {
 
     private static final Logger LOGGER = Logger.getLogger(UnifiedGenerationalParser.class.getName());
-    private boolean debugging = Boolean.getBoolean("microsoft.debug");
 
     private final RuleSet<GCParseRule, BiConsumer<GCLogTrace, String>> parseRules;
 
@@ -106,12 +111,16 @@ public class UnifiedGenerationalParser extends UnifiedGCLogParser implements Uni
             "Reset", Concurrent_Reset
     );
 
-    public UnifiedGenerationalParser(LoggingDiary diary, JVMEventConsumer consumer) {
-        super(diary, consumer);
+    public UnifiedGenerationalParser() {
+    }
+
+    @Override
+    public Set<EventSource> eventsProduced() {
+        return Set.of(EventSource.GENERATIONAL);
     }
 
     public String getName() {
-        return "UnifiedG1GCParser";
+        return "UnifiedGenerationalParser";
     }
 
     @Override
@@ -119,21 +128,26 @@ public class UnifiedGenerationalParser extends UnifiedGCLogParser implements Uni
 
         if (ignoreFrequentlySeenButUnwantedLines(line)) return;
 
-        Optional<AbstractMap.SimpleEntry<GCParseRule, GCLogTrace>> ruleToApply = parseRules.keys().stream()
+        parseRules.stream()
+                .map(Map.Entry::getKey)
                 .map(rule -> new AbstractMap.SimpleEntry<>(rule, rule.parse(line)))
                 .filter(tuple -> tuple.getValue() != null)
-                .findFirst();
-        if (!ruleToApply.isPresent()) {
-            log(line);
-            return;
-        }
+                .findAny()
+                .ifPresentOrElse(
+                        tuple -> {
+                            applyRule(tuple.getKey(), tuple.getValue(), line);
+                        },
+                        () -> LOGGER.log(Level.FINE, "Missed: {0}", line)
+                );
+    }
 
+
+    private void applyRule(GCParseRule ruleToApply, GCLogTrace trace, String line) {
         try {
-            parseRules.get(ruleToApply.get().getKey()).accept(ruleToApply.get().getValue(), line);
+            parseRules.select(ruleToApply).accept(trace, line);
         } catch (Throwable t) {
             LOGGER.throwing(this.getName(), "process", t);
         }
-        log(line);
     }
 
     /*************
@@ -145,17 +159,13 @@ public class UnifiedGenerationalParser extends UnifiedGCLogParser implements Uni
     private GenerationalForwardReference concurrentEvent = null;
     private boolean inConcurrentPhase = false;
 
-//    private boolean isCMS;
-//    private boolean isParallel;
-//    private boolean isSerial;
-
     private void tag(GCLogTrace trace, String line) {
         noop();
     }
 
     private void youngHeader(GCLogTrace trace, String line) {
         if (pauseEvent != null)
-            LOGGER.warning("Pause event not recorded: " + pauseEvent.getGcID());
+            LOGGER.warning("Young pause event not recorded: " + pauseEvent.getGcID());
         if (diary.isCMS())
             pauseEvent = new GenerationalForwardReference(ParNew, new Decorators(line), super.GCID_COUNTER.parse(line).getIntegerGroup(1));
         else if (diary.isPSYoung())
@@ -304,7 +314,7 @@ public class UnifiedGenerationalParser extends UnifiedGCLogParser implements Uni
         } else if (pauseEvent.getGarbageCollectionType() == DefNew) {
             pauseEvent.convertToSerialFull();
         } else if (pauseEvent.getGarbageCollectionType() != ConcurrentModeFailure) {
-            LOGGER.warning("Pause event not recorded: " + pauseEvent.getGcID()); //todo: difficult to know if this is a full or a CMF
+            LOGGER.warning("Maybe Full Pause event not recorded: " + pauseEvent.getGcID()); //todo: difficult to know if this is a full or a CMF
             pauseEvent = new GenerationalForwardReference(FullGC, new Decorators(line), super.GCID_COUNTER.parse(line).getIntegerGroup(1));
             pauseEvent.setStartTime(getClock());
         }
@@ -339,7 +349,7 @@ public class UnifiedGenerationalParser extends UnifiedGCLogParser implements Uni
     }
 
     private void jvmExit(GCLogTrace trace, String line) {
-        consumer.record(new JVMTermination(getClock()));
+        super.publish(ChannelName.GENERATIONAL_HEAP_PARSER_OUTBOX,  new JVMTermination(getClock(),diary.getTimeOfFirstEvent()));
     }
 
     /**
@@ -368,19 +378,19 @@ public class UnifiedGenerationalParser extends UnifiedGCLogParser implements Uni
                 if (inConcurrentPhase) {
                     cache.add(buildPauseEvent((pauseEvent)));
                 } else {
-                    consumer.record(buildPauseEvent(pauseEvent));
+                    publish(buildPauseEvent(pauseEvent));
                 }
                 pauseEvent = null;
             } else if (concurrentCyclePauseEvent != null && concurrentCyclePauseEvent.getGcID() == gcid) {
                 concurrentCyclePauseEvent.add(cpuSummary);
-                consumer.record(buildPauseEvent(concurrentCyclePauseEvent));
+                publish(buildPauseEvent(concurrentCyclePauseEvent));
                 concurrentCyclePauseEvent = null;
             } else if ((concurrentEvent != null) && (concurrentEvent.getGcID() == gcid)) {
                 concurrentEvent.add(cpuSummary);
-                consumer.record(buildConcurrentPhase(concurrentEvent));
+                publish(buildConcurrentPhase(concurrentEvent));
                 concurrentEvent = null;
                 inConcurrentPhase = false;
-                cache.forEach(consumer::record);
+                cache.forEach(this::publish);
                 cache.clear();
             }
         }
@@ -473,12 +483,21 @@ public class UnifiedGenerationalParser extends UnifiedGCLogParser implements Uni
     }
 
     private FullGC buildFullGC(GenerationalForwardReference forwardReference) {
+        FullGC gc;
         switch (forwardReference.getGarbageCollectionType()) {
             case PSFull:
-                return fillOutFullGC(new PSFullGC(forwardReference.getStartTime(), forwardReference.getGCCause(), forwardReference.getDuration()), forwardReference);
+                if ( forwardReference.getGCCause().equals(GCCause.JAVA_LANG_SYSTEM))
+                    gc = new SystemGC(forwardReference.getStartTime(), forwardReference.getGCCause(), forwardReference.getDuration());
+                else
+                    gc = new PSFullGC(forwardReference.getStartTime(), forwardReference.getGCCause(), forwardReference.getDuration());
+                return fillOutFullGC(gc, forwardReference);
             case FullGC:
             case Full:
-                return fillOutFullGC(new FullGC(forwardReference.getStartTime(), forwardReference.getGCCause(), forwardReference.getDuration()), forwardReference);
+                if ( forwardReference.getGCCause().equals(GCCause.JAVA_LANG_SYSTEM))
+                    gc = new SystemGC(forwardReference.getStartTime(), forwardReference.getGCCause(), forwardReference.getDuration());
+                else
+                    gc = new FullGC(forwardReference.getStartTime(), forwardReference.getGCCause(), forwardReference.getDuration());
+                return fillOutFullGC(gc, forwardReference);
             default:
                 LOGGER.warning(forwardReference.getGarbageCollectionType() + " is unrecognized");
         }
@@ -550,12 +569,17 @@ public class UnifiedGenerationalParser extends UnifiedGCLogParser implements Uni
         return line.contains("Desired") || line.contains("Age table") || line.contains("- age ");
     }
 
+    @Override
+    public boolean accepts(Diary diary) {
+        return (diary.isGenerational() || diary.isCMS() ) && diary.isUnifiedLogging();
+    }
 
-    private void log(String line) {
-        if (debugging)
-            LOGGER.fine("Missed: " + line);
+    @Override
+    public void publishTo(JVMEventChannel bus) {
+        super.publishTo(bus);
+    }
 
-        LOGGER.log(Level.FINE, "Missed: {0}", line);
-
+    private void publish(GenerationalGCEvent event) {
+        super.publish(ChannelName.GENERATIONAL_HEAP_PARSER_OUTBOX, event);
     }
 }

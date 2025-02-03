@@ -2,9 +2,14 @@
 // Licensed under the MIT License.
 package com.microsoft.gctoolkit.parser;
 
+import com.microsoft.gctoolkit.aggregator.EventSource;
 import com.microsoft.gctoolkit.event.jvm.JVMTermination;
 import com.microsoft.gctoolkit.event.jvm.SurvivorRecord;
-import com.microsoft.gctoolkit.parser.jvm.LoggingDiary;
+import com.microsoft.gctoolkit.jvm.Diary;
+import com.microsoft.gctoolkit.message.ChannelName;
+import com.microsoft.gctoolkit.message.JVMEventChannel;
+
+import java.util.Set;
 
 import static com.microsoft.gctoolkit.parser.unified.UnifiedPatterns.JVM_EXIT;
 
@@ -12,8 +17,11 @@ public class SurvivorMemoryPoolParser extends PreUnifiedGCLogParser implements T
 
     private SurvivorRecord forwardReference = null;
 
-    public SurvivorMemoryPoolParser(LoggingDiary diary, JVMEventConsumer consumer) {
-        super(diary, consumer);
+    public SurvivorMemoryPoolParser() {}
+
+    @Override
+    public Set<EventSource> eventsProduced() {
+        return Set.of(EventSource.SURVIVOR);
     }
 
     public String getName() {
@@ -37,11 +45,21 @@ public class SurvivorMemoryPoolParser extends PreUnifiedGCLogParser implements T
             forwardReference.add(trace.getIntegerGroup(1), trace.getLongGroup(2));
         } else if (entry.equals(END_OF_DATA_SENTINEL) || (JVM_EXIT.parse(entry) != null)) {
             if (forwardReference != null)
-                consumer.record(forwardReference);
-            consumer.record(new JVMTermination(getClock()));
+                super.publish(ChannelName.SURVIVOR_MEMORY_POOL_PARSER_OUTBOX, forwardReference);
+            super.publish(ChannelName.SURVIVOR_MEMORY_POOL_PARSER_OUTBOX, new JVMTermination(getClock(),diary.getTimeOfFirstEvent()));
         } else if (forwardReference != null) {
-            consumer.record(forwardReference);
+            super.publish(ChannelName.SURVIVOR_MEMORY_POOL_PARSER_OUTBOX, forwardReference);
             forwardReference = null;
         }
+    }
+
+    @Override
+    public boolean accepts(Diary diary) {
+        return diary.isTenuringDistribution() && ! diary.isUnifiedLogging();
+    }
+
+    @Override
+    public void publishTo(JVMEventChannel channel) {
+        super.publishTo(channel);
     }
 }

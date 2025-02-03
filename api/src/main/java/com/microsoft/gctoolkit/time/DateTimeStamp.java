@@ -2,16 +2,18 @@
 // Licensed under the MIT License.
 package com.microsoft.gctoolkit.time;
 
+import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.time.chrono.ChronoZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.time.temporal.TemporalAccessor;
-
 import java.util.Comparator;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-import static java.util.Comparator.comparingDouble;
-import static java.util.Comparator.nullsLast;
+import static java.util.Comparator.*;
 
 
 /**
@@ -22,18 +24,21 @@ import static java.util.Comparator.nullsLast;
  * Instance of DateTimeStamp are created by the parser. The constructors match what might be
  * found for dates and time stamps in a GC log file.
  */
+
 public class DateTimeStamp implements Comparable<DateTimeStamp> {
     // Represents the time from Epoch
     // In the case where we have timestamps, the epoch is start of JVM
     // In the case where we only have date stamps, the epoch is 1970:01:01:00:00:00.000::UTC+0
     // All calculations in GCToolKit make use of the double, timeStamp.
-    // Calculations are based on an startup Epoch of 0.000 seconds. This isn't always the case and
+    // Calculations are based on the startup Epoch of 0.000 seconds. This isn't always the case and
     // certainly isn't the case when only date stamp is present. In these cases, start time is estimated.
     // This is surprisingly difficult to do thus use of timestamp is highly recommended.
 
     // Requirements
     // Timestamp can never be less than 0
     //      - use NaN to say it's not set
+    public final static double TIMESTAMP_NOT_SET = Double.NaN;
+    public final static ZonedDateTime EPOC = ZonedDateTime.ofInstant(Instant.EPOCH, ZoneId.of("GMT"));
     private final ZonedDateTime dateTime;
     private final double timeStamp;
     public static final Comparator<DateTimeStamp> comparator = getComparator();
@@ -41,12 +46,60 @@ public class DateTimeStamp implements Comparable<DateTimeStamp> {
     // For some reason, ISO_DATE_TIME doesn't like that time-zone is -0100. It wants -01:00.
     private static final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
 
-    private static ZonedDateTime fromString(String iso8601DateTime) {
-        if (iso8601DateTime != null) {
-            TemporalAccessor temporalAccessor = formatter.parse(iso8601DateTime);
-            return ZonedDateTime.from(temporalAccessor);
-        }
-        return null;
+    private static ZonedDateTime dateFromString(String iso8601DateTime) {
+        if (iso8601DateTime == null)
+            return null;
+        return ZonedDateTime.from(formatter.parse(iso8601DateTime));
+    }
+
+    private static double ageFromString(String doubleFormat) {
+        if ( doubleFormat == null) return TIMESTAMP_NOT_SET;
+        return Double.parseDouble(doubleFormat.replace(",","."));
+    }
+
+    // Patterns needed to support conversion of a log line to a DateTimeStamp
+
+    private static final String DECIMAL_POINT = "(?:\\.|,)";
+    private static final String INTEGER = "\\d+";
+    private static final String DATE = "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}[+|-]\\d{4}";
+    private static final String TIME = INTEGER + DECIMAL_POINT + "\\d{3}";
+
+    // Unified Tokens
+    private static final String DATE_TAG = "\\[" + DATE + "]";
+    private static final String UPTIME_TAG = "\\[(" + TIME + ")s]";
+
+    // Pre-unified tokens
+    private static final String TIMESTAMP = "(" + TIME + "): ";
+    private static final String DATE_STAMP = "(" + DATE + "): ";
+    private static final String DATE_TIMESTAMP = "^(?:" + DATE_STAMP + ")?" + TIMESTAMP;
+
+    //  2017-09-07T09:00:12.795+0200: 0.716:
+    private static final Pattern PREUNIFIED_DATE_TIMESTAMP = Pattern.compile(DATE_TIMESTAMP);
+    // JEP 158 has ISO-8601 time and uptime in seconds and milliseconds as the first two decorators.
+    private static final Pattern UNIFIED_DATE_TIMESTAMP = Pattern.compile("^(" + DATE_TAG + ")?(" + UPTIME_TAG + ")?");
+    public static final DateTimeStamp EMPTY_DATE = new DateTimeStamp(EPOC, TIMESTAMP_NOT_SET);
+
+    public static DateTimeStamp fromGCLogLine(String line) {
+        Matcher matcher;
+        int captureGroup = 2;
+        if ( line.startsWith("[")) {
+            matcher = UNIFIED_DATE_TIMESTAMP.matcher(line);
+            captureGroup = 3;
+        } else
+            matcher = PREUNIFIED_DATE_TIMESTAMP.matcher(line);
+
+        if ( matcher.find())
+            return new DateTimeStamp(dateFromString(matcher.group(1)), ageFromString(matcher.group(captureGroup)));
+        else
+            return EMPTY_DATE;
+    }
+
+    /**
+     * Provides a minimal date.
+     * @return a minimal date
+     */
+    public static DateTimeStamp baseDate() {
+        return new DateTimeStamp(EPOC, 0.0d);
     }
 
     /**
@@ -54,7 +107,7 @@ public class DateTimeStamp implements Comparable<DateTimeStamp> {
      * @param iso8601DateTime A String in ISO 8601 format.
      */
     public DateTimeStamp(String iso8601DateTime) {
-        this(fromString(iso8601DateTime));
+        this(dateFromString(iso8601DateTime));
     }
 
     /**
@@ -72,7 +125,7 @@ public class DateTimeStamp implements Comparable<DateTimeStamp> {
      * @param timeStamp A time stamp in decimal seconds.
      */
     public DateTimeStamp(String iso8601DateTime, double timeStamp) {
-        this(fromString(iso8601DateTime), timeStamp);
+        this(dateFromString(iso8601DateTime), timeStamp);
     }
 
     /**
@@ -94,21 +147,32 @@ public class DateTimeStamp implements Comparable<DateTimeStamp> {
      */
     public DateTimeStamp(ZonedDateTime dateTime, double timeStamp) {
         this.dateTime = dateTime;
-        //NaN is our agreed upon not set but less than 0 makes no sense either.
-        if ( dateTime != null && (Double.isNaN(timeStamp) || timeStamp < 0.0d)) {
-            //Converts the long nano value to a decimal nano value. The timeStamp value is in decimal seconds - <seconds>.<millis>
-            this.timeStamp = dateTime.toEpochSecond() + dateTime.getNano() / 1_000_000_000d;
-        }
+        if ( (timeStamp < 0.00d) || Double.isNaN(timeStamp))
+            this.timeStamp = TIMESTAMP_NOT_SET;
         else
-            this.timeStamp = getTimestampValue(timeStamp);
+            // the time stamps in the log have 3 significant digits after the decimal. This corrects for that.
+            this.timeStamp = Math.round(timeStamp * 1000.0d) / 1000.0d;
     }
 
     /**
      * Return the time stamp value. Allows a consistent time stamp be available to all calculations.
      * @return The time stamp value, in decimal seconds.
      */
+    @Deprecated
     public double getTimeStamp() {
+        if (!hasTimeStamp())
+            return toEpochInMillis();
         return timeStamp;
+    }
+
+    public double toMilliseconds() {
+        if (!hasTimeStamp())
+            return toEpochInMillis();
+        return timeStamp * 1000.0d;
+    }
+
+    public double toSeconds() {
+        return toMilliseconds() / 1000.0d;
     }
 
     /**
@@ -121,18 +185,26 @@ public class DateTimeStamp implements Comparable<DateTimeStamp> {
 
     /**
      * Return {@code true} if the date stamp is not {@code null}.
-     * @return {@code true} if the the date stamp is not {@code null}.
+     * It is possible to have two DateTimeStamps from the same GC log, one with a DateStamp and one without.
+     * @return {@code true} if the date stamp is not {@code null}.
      */
     public boolean hasDateStamp() {
-        return getDateTime() != null;
+        return ! (getDateTime() == null || EPOC.equals(getDateTime()));
+    }
+
+    public boolean hasTimeStamp() {
+        return ! Double.isNaN(timeStamp);
     }
 
     @Override
     public boolean equals(Object obj) {
-        if ( obj instanceof  DateTimeStamp) {
-            DateTimeStamp other = (DateTimeStamp)obj;
-            boolean eq = getDateTime() == null ? other.getDateTime() == null : getDateTime().equals(other.getDateTime());
-            return eq && getTimeStamp() == other.getTimeStamp();
+        if (obj instanceof DateTimeStamp) {
+            DateTimeStamp other = (DateTimeStamp) obj;
+            if (this.hasDateStamp())
+                return this.getDateTime().equals(other.getDateTime()) &&
+                        (this.getTimeStamp() == other.getTimeStamp());
+            else
+                return getTimeStamp() == other.getTimeStamp();
         }
         return false;
     }
@@ -144,28 +216,12 @@ public class DateTimeStamp implements Comparable<DateTimeStamp> {
 
     @Override
     public String toString() {
-        if (dateTime == null)
-            return "@" + String.format(Locale.US, "%.3f", timeStamp);
-        else
-            return dateTime + "@" + String.format(Locale.US, "%.3f", timeStamp);
-    }
-
-    /**
-     * Return {@code true} if this time stamp is less than the other.
-     * @param other The other time stamp, in decimal seconds.
-     * @return {@code true} if this time stamp is less than the other.
-     */
-    public boolean before(double other) {
-        return getTimeStamp() < getTimestampValue(other);
-    }
-
-    /**
-     * Return {@code true} if this time stamp is greater than the other.
-     * @param other The other time stamp, in decimal seconds.
-     * @return {@code true} if this time stamp is greater than the other.
-     */
-    public boolean after(double other) {
-        return getTimeStamp() > getTimestampValue(other);
+        StringBuilder buffer = new StringBuilder();
+        if (hasDateStamp())
+            buffer.append(getDateTime().toString());
+        if (hasTimeStamp())
+            buffer.append("@").append(String.format(Locale.US,"%.3f", getTimeStamp()));
+        return buffer.toString();
     }
 
     /**
@@ -174,7 +230,7 @@ public class DateTimeStamp implements Comparable<DateTimeStamp> {
      * @return {@code true} if this time stamp is less than the other.
      */
     public boolean before(DateTimeStamp other) {
-        return !after(other);
+        return compareTo(other) < 0;
     }
 
     /**
@@ -183,14 +239,7 @@ public class DateTimeStamp implements Comparable<DateTimeStamp> {
      * @return {@code true} if this time stamp is less than the other.
      */
     public boolean after(DateTimeStamp other) {
-        if ((other.hasDateStamp()) && (this.hasDateStamp())) {
-            int comparison = other.compare(getDateTime());
-            if (comparison < 0)
-                return true;
-            else if (comparison > 0)
-                return false;
-        }
-        return after(other.getTimeStamp());
+        return compareTo(other) > 0;
     }
 
     /**
@@ -206,10 +255,8 @@ public class DateTimeStamp implements Comparable<DateTimeStamp> {
             if (getDateTime().isAfter(otherDate)) return 1;
             if (getDateTime().isBefore(otherDate)) return -1;
             return 0;
-        } else if (hasDateStamp()) {
-            return 1;
         } else {
-            return -1;
+            throw new IllegalStateException("One or more DateStamp is missing");
         }
     }
 
@@ -220,21 +267,23 @@ public class DateTimeStamp implements Comparable<DateTimeStamp> {
      * @return A new {@code DateTimeStamp}, {@code offsetInDecimalSeconds} from this.
      */
     public DateTimeStamp add(double offsetInDecimalSeconds) {
-        DateTimeStamp now;
-        // if passed value is NAN then consider offset seconds as 0.0d
-        offsetInDecimalSeconds = getTimestampValue(offsetInDecimalSeconds);
-        if (dateTime != null) {
-            int seconds = (int) offsetInDecimalSeconds;
-            long nanos = (long) ((offsetInDecimalSeconds % 1) * 1_000_000_000L);
-            now = new DateTimeStamp(dateTime.plusSeconds(seconds).plusNanos(nanos), timeStamp + offsetInDecimalSeconds);
-        } else
-            now = new DateTimeStamp(getTimeStamp() + offsetInDecimalSeconds);
+        if (Double.isNaN(offsetInDecimalSeconds))
+            throw new IllegalArgumentException("Cannot add " + Double.NaN);
 
-        return now;
-    }
+        double adjustedTimeStamp = Double.NaN;
+        ZonedDateTime adjustedDateStamp = null;
+        if ( hasTimeStamp()) {
+            adjustedTimeStamp = getTimeStamp() + offsetInDecimalSeconds;
+        }
 
-    private double getTimestampValue(double timestamp) {
-        return Double.isNaN(timestamp)? 0.0d: timestamp;
+        if (hasDateStamp()) {
+            double offset = (Double.isNaN(offsetInDecimalSeconds)) ? 0.000d : offsetInDecimalSeconds;
+            int seconds = (int) offset;
+            long nanos = ((long) ((offset % 1) * 1_000L)) * 1_000_000L;
+            adjustedDateStamp = dateTime.plusSeconds(seconds).plusNanos(nanos);
+        }
+
+        return new DateTimeStamp(adjustedDateStamp, adjustedTimeStamp);
     }
 
     /**
@@ -250,12 +299,19 @@ public class DateTimeStamp implements Comparable<DateTimeStamp> {
     /**
      * Return the difference between this time stamp, and the time stamp of
      * the other DateTimeStamp.
-     * @param dateTimeStamp The other {@code DateTimeStamp}
+     * @param other The other {@code DateTimeStamp}
      * @return The difference between this time stamp, and the time stamp
      * of the other DateTimeStamp.
      */
-    public double minus(DateTimeStamp dateTimeStamp) {
-        return timeStamp - dateTimeStamp.timeStamp;
+    public double minus(DateTimeStamp other) {
+        if (hasTimeStamp() && other.hasTimeStamp())
+            return getTimeStamp() - other.getTimeStamp();
+        if (hasDateStamp() && other.hasDateStamp()) {
+            double thisInSeconds = (double)getDateTime().toEpochSecond() + ((double)(getDateTime().getNano() / 1_000_000)) / 1000.0d;
+            double otherInSeconds = (double)other.getDateTime().toEpochSecond() + ((double)(other.getDateTime().getNano() / 1_000_000)) / 1000.0d;
+            return thisInSeconds - otherInSeconds;
+        }
+        return Double.NaN;
     }
 
     /**
@@ -276,12 +332,12 @@ public class DateTimeStamp implements Comparable<DateTimeStamp> {
      */
     @Override
     public int compareTo(DateTimeStamp dateTimeStamp) {
-
         return  comparator.compare(this,dateTimeStamp);
     }
 
     private static  Comparator<DateTimeStamp> getComparator(){
         // compare with dateTime field, if null then it will go to last
+        // need a check to make sure these are comparable
         return nullsLast((o1, o2) -> {
             Comparator<DateTimeStamp> dateTimeStampComparator = compareDateTimeStamp(o1, o2);
             return dateTimeStampComparator.compare(o1,o2);
@@ -289,11 +345,18 @@ public class DateTimeStamp implements Comparable<DateTimeStamp> {
     }
 
     private static Comparator<DateTimeStamp> compareDateTimeStamp(DateTimeStamp o1, DateTimeStamp o2) {
-        return comparingDouble(DateTimeStamp::getTimeStamp)
-                .thenComparing(DateTimeStamp::getDateTime,
-                        (dtsA, dtsB) -> {
-                            if (dtsA == null || dtsB == null) return 0;
-                            else return dtsA.compareTo(dtsB);
-                        });
+        if (o1.hasTimeStamp() && o2.hasTimeStamp())
+            return comparingDouble(DateTimeStamp::getTimeStamp);
+        else if (o1.hasDateStamp() && o2.hasDateStamp())
+            return comparing(DateTimeStamp::getDateTime, ChronoZonedDateTime::compareTo);
+        else
+            throw new IllegalStateException("DateTimeStamp parameters cannot be compared as either timestamp or datestamp must be set in both instances.");
+    }
+
+    public double toEpochInMillis() {
+        if ( dateTime != null) {
+            return (double)(dateTime.toEpochSecond() * 1000) + (((double)dateTime.getNano()) / 1_000_000.0d);
+        }
+        return Double.NaN;
     }
 }

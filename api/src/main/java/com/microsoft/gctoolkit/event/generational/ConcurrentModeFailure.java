@@ -6,14 +6,9 @@ import com.microsoft.gctoolkit.event.GCCause;
 import com.microsoft.gctoolkit.event.GarbageCollectionTypes;
 import com.microsoft.gctoolkit.time.DateTimeStamp;
 
-public class ConcurrentModeFailure extends FullGC {
+public class ConcurrentModeFailure extends FullGC implements CMSPhase {
 
     public ConcurrentModeFailure(DateTimeStamp timeStamp, GCCause cause, double duration) {
         super(timeStamp, GarbageCollectionTypes.ConcurrentModeFailure, cause, duration);
-    }
-
-    @Override
-    public boolean isConcurrentModeFailure() {
-        return true;
     }
 }

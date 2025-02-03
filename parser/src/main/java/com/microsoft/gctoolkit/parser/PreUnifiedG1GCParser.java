@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 package com.microsoft.gctoolkit.parser;
 
+import com.microsoft.gctoolkit.GCToolKit;
+import com.microsoft.gctoolkit.aggregator.EventSource;
 import com.microsoft.gctoolkit.event.CPUSummary;
 import com.microsoft.gctoolkit.event.GCCause;
 import com.microsoft.gctoolkit.event.GarbageCollectionTypes;
@@ -26,11 +28,14 @@ import com.microsoft.gctoolkit.event.g1gc.G1Young;
 import com.microsoft.gctoolkit.event.g1gc.G1YoungInitialMark;
 import com.microsoft.gctoolkit.event.jvm.JVMEvent;
 import com.microsoft.gctoolkit.event.jvm.JVMTermination;
-import com.microsoft.gctoolkit.time.DateTimeStamp;
+import com.microsoft.gctoolkit.jvm.Diary;
+import com.microsoft.gctoolkit.message.ChannelName;
+import com.microsoft.gctoolkit.message.JVMEventChannel;
 import com.microsoft.gctoolkit.parser.collection.MRUQueue;
-import com.microsoft.gctoolkit.parser.jvm.LoggingDiary;
+import com.microsoft.gctoolkit.time.DateTimeStamp;
 
 import java.util.AbstractMap;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.BiConsumer;
 import java.util.logging.Level;
@@ -48,7 +53,6 @@ import java.util.logging.Logger;
 public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCPatterns {
 
     private static final Logger LOGGER = Logger.getLogger(PreUnifiedG1GCParser.class.getName());
-    private boolean debugging = Boolean.getBoolean("microsoft.debug");
 
     //values show up at the end of GC log file from a normally terminated JVM
     @SuppressWarnings("unused")
@@ -233,9 +237,13 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         parseRules.put(new GCParseRule("END_OF_DATA_SENTINEL", END_OF_DATA_SENTINEL), this::endOfFile);
     }
 
-    public PreUnifiedG1GCParser(LoggingDiary diary, JVMEventConsumer consumer) {
-        super(diary, consumer);
+    public PreUnifiedG1GCParser() {
         forwardReference = trap;
+    }
+
+    @Override
+    public Set<EventSource> eventsProduced() {
+        return Set.of(EventSource.G1GC);
     }
 
     public String getName() {
@@ -267,7 +275,7 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
     }
 
     public void endOfFile(GCLogTrace trace, String line) {
-        consumer.record(new JVMTermination(getClock()));
+        super.publish(ChannelName.G1GC_PARSER_OUTBOX, new JVMTermination(getClock(),diary.getTimeOfFirstEvent()));
     }
 
     //18.298: [G1Ergonomics (CSet Construction) add young regions to CSet, eden: 512 regions, survivors: 0 regions, predicted young region time: 7833.33 ms]
@@ -288,8 +296,8 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
 
     private void g1YoungSplitStart(GCLogTrace trace, String line) {
         timeStampForwardReference = getClock();
-        gcCauseForwardReference = trace.gcCause(3, 0);
-        if ("(young)".equals(trace.getGroup(4)))
+        gcCauseForwardReference = trace.gcCause();
+        if ("(young)".equals(trace.getGroup(7)))
             collectionTypeForwardReference = GarbageCollectionTypes.Young;
         else
             collectionTypeForwardReference = GarbageCollectionTypes.Mixed;
@@ -336,6 +344,9 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         if (line.startsWith("Heap after GC invocations=")) return true;
         if (line.startsWith("OpenJDK")) return true;
         if (line.equals("}")) return true;
+        if (line.startsWith("Java HotSpot(TM)")) return true;
+        if (line.startsWith("CommandLine")) return true;
+        if (line.startsWith("Memory: ")) return true;
         return line.contains("Allocation failed. Thread");
     }
 
@@ -356,19 +367,18 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
     //26.893: [GC pause (G1 Evacuation Pause) (young) (to-space exhausted), 0.1709670 secs]
     //115.421: [GC pause (G1 Evacuation Pause) (young) (initial-mark) (to-space exhausted), 0.0476190 secs]
     private void processYoungGenCollection(GCLogTrace trace, String line) {
-
-        boolean initialMark = trace.contains(5, "initial-mark");
+        boolean initialMark = trace.contains(8, "initial-mark");
         boolean tospaceExhausted = trace.contains(trace.groupCount() - 2, "to-space");
 
-        if (trace.contains(4, "young")) {
+        if (trace.contains(7, "young")) {
             if (initialMark)
                 forwardReference = new G1YoungInitialMark(trace.getDateTimeStamp(), trace.gcCause(3, 0), trace.getDoubleGroup(trace.groupCount()));
             else
-                forwardReference = new G1Young(trace.getDateTimeStamp(), trace.gcCause(3, 0), trace.getDoubleGroup(trace.groupCount()));
+                forwardReference = new G1Young(trace.getDateTimeStamp(), trace.gcCause(), trace.getDoubleGroup(trace.groupCount()));
             if (tospaceExhausted)
                 ((G1Young) forwardReference).toSpaceExhausted();
-        } else if (trace.contains(4, "mixed")) {
-            forwardReference = new G1Mixed(trace.getDateTimeStamp(), trace.gcCause(3, 0), trace.getDoubleGroup(trace.groupCount()));
+        } else if (trace.contains(7, "mixed")) {
+            forwardReference = new G1Mixed(trace.getDateTimeStamp(), trace.gcCause(), trace.getDoubleGroup(trace.groupCount()));
             if (tospaceExhausted)
                 ((G1Mixed) forwardReference).toSpaceExhausted();
         } else
@@ -380,10 +390,6 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
     //1566.108: [GC pause (mixed) 7521K->5701K(13M), 0.0030090 secs]
     //549.243: [GC pause (young) (initial-mark) 9521K->7824K(13M), 0.0021590 secs]
     private void processYoung(GCLogTrace trace, String line) {
-        if (trace.getGroup(7) != null)
-            trace.notYetImplemented();
-        if (trace.getGroup(8) != null)
-            trace.notYetImplemented();
         MemoryPoolSummary summary = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(9);
         if ("young".equals(trace.getGroup(4))) {
             G1Young collection = null;
@@ -394,11 +400,11 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
                 return;
             }
             collection.addMemorySummary(summary);
-            record(collection);
+            publish(collection);
         } else if ("mixed".equals(trace.getGroup(4))) {
             G1Young collection = new G1Mixed(getClock(), trace.gcCause(), trace.getPauseTime());
             collection.addMemorySummary(summary);
-            record(collection);
+            publish(collection);
         } else
             trace.notYetImplemented();
     }
@@ -411,7 +417,7 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         forwardReference.addMemorySummary(edenSummary, survivor, heap);
         forwardReference.addPermOrMetaSpaceRecord(extractPermOrMetaspaceRecord(line));
         if ((diary != null) && (!diary.isPrintGCDetails()))
-            record(forwardReference);
+            publish(forwardReference);
     }
 
     private void processNoDetailsMemorySummary(GCLogTrace trace, String line) {
@@ -420,25 +426,25 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         if (collectionTypeForwardReference == GarbageCollectionTypes.Young) {
             forwardReference = new G1Young(timeStampForwardReference, gcCauseForwardReference, trace.getPauseTime());
             forwardReference.addMemorySummary(summary);
-            record(forwardReference);
+            publish(forwardReference);
         } else if (collectionTypeForwardReference == GarbageCollectionTypes.Mixed) {
             forwardReference = new G1Mixed(timeStampForwardReference, gcCauseForwardReference, trace.getPauseTime());
             forwardReference.addMemorySummary(summary);
-            record(forwardReference);
+            publish(forwardReference);
         } else if (collectionTypeForwardReference == GarbageCollectionTypes.G1GCYoungInitialMark) {
             forwardReference = new G1YoungInitialMark(timeStampForwardReference, gcCauseForwardReference, trace.getPauseTime());
             forwardReference.addMemorySummary(summary);
-            record(forwardReference);
+            publish(forwardReference);
         } else if (collectionTypeForwardReference == GarbageCollectionTypes.Full) {
             forwardReference = new G1FullGCNES(timeStampForwardReference, gcCauseForwardReference, trace.getPauseTime());
             if (!hasPrintGCDetails()) {
                 forwardReference.addMemorySummary(summary);
-                record(forwardReference);
+                publish(forwardReference);
             }
         } else if (collectionTypeForwardReference == GarbageCollectionTypes.G1GCCleanup) {
             G1Cleanup cleanup = new G1Cleanup(timeStampForwardReference, trace.getDuration());
             cleanup.addMemorySummary(summary);
-            record(cleanup);
+            publish(cleanup);
         } else
             trace.notYetImplemented();
     }
@@ -524,11 +530,11 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
 
         // close the concurrent phase
         if ("root-region-scan".equals(trace.getGroup(7))) {
-            record(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, trace.getPauseTime()));
+            publish(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, trace.getPauseTime()));
         } else if ("mark".equals(trace.getGroup(7))) {
-            record(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, trace.getPauseTime()));
+            publish(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, trace.getPauseTime()));
         } else if ("cleanup".equals(trace.getGroup(7))) {
-            record(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, trace.getPauseTime()));
+            publish(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, trace.getPauseTime()));
         } else
             trace.notYetImplemented();
     }
@@ -550,7 +556,7 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         timeStampForwardReference = getClock();
         gcCauseForwardReference = trace.gcCause();
         concurrentPhaseStartTimeStamp = trace.getDateTimeStamp(2);
-        if (!setGarbageCollectionTypeForwardReference(trace.getGroup(7)))
+        if (!setGarbageCollectionTypeForwardReference(trace.getGroup(13)))
             trace.notYetImplemented();
     }
 
@@ -687,10 +693,10 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
             forwardReference = new G1SystemGC(trace.getDateTimeStamp(), trace.getPauseTime());
         else
             forwardReference = new G1FullGCNES(trace.getDateTimeStamp(), trace.gcCause(), trace.getPauseTime());
-        forwardReference.addMemorySummary(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(4));
-        // not thrilled about this "hack".... but currently no way to differentiate between a full with details and a full withoutgit c
+        forwardReference.addMemorySummary(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(7));
+        // not thrilled about this "hack".... but currently no way to differentiate between a full with details and a full without CPU summary
         if ((diary != null) && (!diary.isPrintGCDetails()))
-            record(forwardReference);
+            publish(forwardReference);
     }
 
     private boolean recordConcurrentPhase(String phaseName, double duration) {
@@ -699,11 +705,11 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
             default:
                 return false;
             case "root-region-scan":
-                record(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, duration));
+                publish(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, duration));
             case "mark":
-                record(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, duration));
+                publish(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, duration));
             case "cleanup":
-                record(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, duration));
+                publish(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, duration));
         }
         return true;
     }
@@ -777,9 +783,9 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
     private void g1InitialMark(GCLogTrace trace, String line) {
         timeStampForwardReference = getClock();
         gcCauseForwardReference = trace.gcCause();
-        if ("young".equals(trace.getGroup(4)))
+        if ("young".equals(trace.getGroup(7)))
             collectionTypeForwardReference = GarbageCollectionTypes.G1GCYoungInitialMark;
-        else if (trace.contains(4, "mixed"))
+        else if (trace.contains(7, "mixed"))
             collectionTypeForwardReference = GarbageCollectionTypes.G1GCMixedInitialMark;
         else
             trace.notYetImplemented();
@@ -791,7 +797,7 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
     private void freeFloatingOccupancySummary(GCLogTrace trace, String line) {
         if (collectionTypeForwardReference == GarbageCollectionTypes.Full) {
             forwardReference = new G1FullGCNES(timeStampForwardReference, gcCauseForwardReference, trace.getPauseTime());
-            record(forwardReference);
+            publish(forwardReference);
             collectionTypeForwardReference = GarbageCollectionTypes.Unknown;
             timeStampForwardReference = null;
             gcCauseForwardReference = GCCause.UNKNOWN_GCCAUSE;
@@ -815,46 +821,44 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
     }
 
     private void concurrentStringDedup(GCLogTrace trace, String line) {
-        double startingStringVolume = trace.toKBytes(trace.getDoubleGroup(4), trace.getGroup(5));
-        double endingStringValue = trace.toKBytes(trace.getDoubleGroup(6), trace.getGroup(7));
-        double reduction = trace.toKBytes(trace.getDoubleGroup(8), trace.getGroup(9));
+        double startingStringVolume = trace.toKBytes(4);
+        double endingStringValue = trace.toKBytes(6);
+        double reduction = trace.toKBytes(8);
         double percentReduction = trace.getDoubleGroup(10);
-        record(new G1ConcurrentStringDeduplication(getClock(), trace.gcCause(), startingStringVolume, endingStringValue, reduction, percentReduction, trace.getDoubleGroup(trace.groupCount())));
+        publish(new G1ConcurrentStringDeduplication(getClock(), trace.gcCause(), startingStringVolume, endingStringValue, reduction, percentReduction, trace.getDoubleGroup(trace.groupCount())));
     }
 
     //9.251: [GC remark, 0.0012190 secs]
     //6.298: [GC remark 6.298: [GC ref-proc, 0.0000570 secs], 0.0010940 secs]
     //2014-02-21T16:04:24.321-0100: 7.852: [GC remark 2014-02-21T16:04:24.322-0100: 7.853: [GC ref-proc, 0.0000640 secs], 0.0013310 secs]
     private void g1Remark(GCLogTrace trace, String line) {
-        G1Remark remark = new G1Remark(trace.getDateTimeStamp(), (trace.getGroup(7) != null) ? trace.getDoubleGroup(7) : 0.0d, trace.getDoubleGroup(trace.groupCount()));
-        record(remark);
+        publish(new G1Remark(trace.getDateTimeStamp(), (trace.getGroup(13) != null) ? trace.getDoubleGroup(13) : 0.0d, trace.getDoubleGroup(trace.groupCount())));
     }
 
     //2015-04-09T14:28:44.235+0100: 6.597: [GC remark 6.597: [Finalize Marking, 0.0091510 secs] 6.606: [GC ref-proc, 0.0014102 secs] 6.608: [Unloading, 0.0044869 secs], 0.0153351 secs]
     //public G1Remark( DateTimeStamp timeStamp, double referenceProcessingTimes, double finalizeMarking, double unloading, double duration)
     private void g1180Remark(GCLogTrace trace, String line) {
-        G1Remark remark = new G1Remark(trace.getDateTimeStamp(), trace.getDoubleGroup(8), trace.getDoubleGroup(5), trace.getDoubleGroup(11), trace.getDoubleGroup(trace.groupCount()));
-        record(remark);
+        G1Remark remark = new G1Remark(trace.getDateTimeStamp(), trace.getDoubleGroup(17), trace.getDoubleGroup(11), trace.getDoubleGroup(23), trace.getDoubleGroup(trace.groupCount()));
+        publish(remark);
     }
 
     private void g1180RemarkRefDetails(GCLogTrace trace, String line) {
-        G1Remark remark = new G1Remark(trace.getDateTimeStamp(), trace.getDoubleGroup(32), trace.getDoubleGroup(5), trace.getDoubleGroup(trace.groupCount() - 1), trace.getDuration());
-        ReferenceGCSummary summary = extractPrintReferenceGC(line);
-        remark.add(summary);
-        record(remark);
+        G1Remark remark = new G1Remark(trace.getDateTimeStamp(), trace.getDoubleGroup(56), trace.getDoubleGroup(11), trace.getDoubleGroup(trace.groupCount() - 1), trace.getDuration());
+        remark.add(extractPrintReferenceGC(line));
+        publish(remark);
     }
 
     //549.253: [GC cleanup 7826K->7826K(13M), 0.0004750 secs]
     //todo: capture memory summary
     private void g1Cleanup(GCLogTrace trace, String line) {
         G1Cleanup cleanup = new G1Cleanup(trace.getDateTimeStamp(), trace.getPauseTime());
-        cleanup.addMemorySummary(getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 4));
-        record(cleanup);
+        cleanup.addMemorySummary(getTotalOccupancyBeforeAfterWithTotalHeapPoolSizeSummary(trace, 7));
+        publish(cleanup);
     }
 
     private void g1CleanupNoMemory(GCLogTrace trace, String line) {
         G1Cleanup cleanup = new G1Cleanup(trace.getDateTimeStamp(), trace.getPauseTime());
-        record(cleanup);
+        publish(cleanup);
     }
 
     private void splitCleanup(GCLogTrace trace, String line) {
@@ -867,13 +871,13 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         if (concurrentPhaseStartTimeStamp != null) {
             G1ConcurrentMark concurrentMark = new G1ConcurrentMark(concurrentPhaseStartTimeStamp, trace.gcCause(), trace.getTimeStamp() - concurrentPhaseStartTimeStamp.getTimeStamp());
             concurrentMark.abort();
-            record(concurrentMark);
+            publish(concurrentMark);
         }
     }
 
     //604.395: [GC concurrent-mark-reset-for-overflow]
     private void concurrentMarkOverflow(GCLogTrace trace, String line) {
-        record(new G1ConcurrentMarkResetForOverflow(getClock()));
+        publish(new G1ConcurrentMarkResetForOverflow(getClock()));
     }
 
     private void g1CorruptedConcurrentEnd(GCLogTrace trace, String line) {
@@ -883,11 +887,11 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
             concurrentPhaseStartTimeStamp = getClock();
 
         if ("root-region-scan".equals(trace.getGroup(1))) {
-            record(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(trace.groupCount())));
+            publish(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(trace.groupCount())));
         } else if ("mark".equals(trace.getGroup(1))) {
-            record(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(trace.groupCount())));
+            publish(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(trace.groupCount())));
         } else if ("cleanup".equals(trace.getGroup(1))) {
-            record(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(trace.groupCount())));
+            publish(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getDoubleGroup(trace.groupCount())));
         } else
             trace.notYetImplemented();
     }
@@ -896,11 +900,11 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         if (concurrentPhaseStartTimeStamp == null)
             concurrentPhaseStartTimeStamp = getClock();
         if ("root-region-scan".equals(trace.getGroup(4)))
-            record(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getPauseTime()));
+            publish(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getPauseTime()));
         else if ("mark".equals(trace.getGroup(4)))
-            record(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getPauseTime()));
+            publish(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getPauseTime()));
         else if ("cleanup".equals(trace.getGroup(4)))
-            record(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getPauseTime()));
+            publish(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getPauseTime()));
     }
 
     public void g1FloatingConcurrentPhaseStart(GCLogTrace trace, String line) {
@@ -909,7 +913,6 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
 
     /***********************************/
     /* Reference processing            */
-
     /***********************************/
 
 
@@ -925,7 +928,7 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         double totalReferenceProcessingTime = summary.getSoftReferencePauseTime() + summary.getWeakReferencePauseTime() + summary.getFinalReferencePauseTime() + summary.getPhantomReferencePauseTime() + summary.getJniWeakReferencePauseTime();
         G1Remark remark = new G1Remark(getClock(), totalReferenceProcessingTime, trace.getPauseTime());
         remark.add(summary);
-        record(remark);
+        publish(remark);
     }
 
 
@@ -936,7 +939,7 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         if ((diary != null) && (isPreJDK17040())) {
             MemoryPoolSummary heap = trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(27);
             forwardReference.addMemorySummary(heap);
-            record(forwardReference);
+            publish(forwardReference);
         }
     }
 
@@ -973,11 +976,11 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         //Order sensitive operations. First completed the concurrent phase.
         String concurrentPhase = trace.getGroup(32);
         if ("root-region-scan".equals(concurrentPhase)) {
-            record(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getPauseTime()));
+            publish(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getPauseTime()));
         } else if ("mark".equals(concurrentPhase)) {
-            record(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getPauseTime()));
+            publish(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getPauseTime()));
         } else if ("cleanup".equals(concurrentPhase)) {
-            record(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getPauseTime()));
+            publish(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, GCCause.UNKNOWN_GCCAUSE, trace.getPauseTime()));
         } else
             trace.notYetImplemented();
 
@@ -996,11 +999,11 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
     private void g1FullInterruptsConcurrentWithReferences(GCLogTrace trace, String line) {
         String concurrentPhase = trace.getGroup(30);  //25 was here before now with Atlassian it wants to be 30.
         if ("root-region-scan".equals(concurrentPhase)) {
-            record(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, trace.gcCause(22), trace.getPauseTime()));
+            publish(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, trace.gcCause(22), trace.getPauseTime()));
         } else if ("mark".equals(concurrentPhase)) {
-            record(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, trace.gcCause(22), trace.getPauseTime()));
+            publish(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, trace.gcCause(22), trace.getPauseTime()));
         } else if ("cleanup".equals(concurrentPhase)) {
-            record(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, trace.gcCause(22), trace.getPauseTime()));
+            publish(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, trace.gcCause(22), trace.getPauseTime()));
         } else
             trace.notYetImplemented();
 
@@ -1014,7 +1017,7 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         if (collectionTypeForwardReference == GarbageCollectionTypes.Full) {
             G1FullGCNES full = new G1FullGCNES(timeStampForwardReference, gcCauseForwardReference, trace.getPauseTime());
             full.addMemorySummary(trace.getOccupancyBeforeAfterWithMemoryPoolSizeSummary(1));
-            record(full);
+            publish(full);
         } else
             trace.notYetImplemented();
     }
@@ -1062,17 +1065,17 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
     }
 
     private void metaspaceFinal(GCLogTrace trace, String line) {
-        metaSpaceUsed = trace.getMemoryInKBytes(1);
-        metaCapacity = trace.getMemoryInKBytes(3);
-        metaCommitted = trace.getMemoryInKBytes(5);
-        metaReserved = trace.getMemoryInKBytes(7);
+        metaSpaceUsed = trace.toKBytes(1);
+        metaCapacity = trace.toKBytes(3);
+        metaCommitted = trace.toKBytes(5);
+        metaReserved = trace.toKBytes(7);
     }
 
     private void classspaceFinal(GCLogTrace trace, String line) {
-        classSpaceUsed = trace.getMemoryInKBytes(1);
-        classSpaceCapacity = trace.getMemoryInKBytes(3);
-        classSpaceCommitted = trace.getMemoryInKBytes(5);
-        classSpaceReserved = trace.getMemoryInKBytes(7);
+        classSpaceUsed = trace.toKBytes(1);
+        classSpaceCapacity = trace.toKBytes(3);
+        classSpaceCommitted = trace.toKBytes(5);
+        classSpaceReserved = trace.toKBytes(7);
     }
 
     /***********************************/
@@ -1083,11 +1086,15 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
 
     @SuppressWarnings("unused")
     private void g1Pre17040Summary(GCLogTrace trace, String line) {
-        MemoryPoolSummary edenSummary = extractPoolSummary(trace, 1);
-        MemoryPoolSummary heap = extractPoolSummary(trace, 13);
-        SurvivorMemoryPoolSummary survivor = extractSurvivorPoolSummary(trace, 9);
-        forwardReference.addMemorySummary(edenSummary, survivor, heap);
-        record(forwardReference);
+        try {
+            MemoryPoolSummary edenSummary = extractPoolSummary(trace, 1);
+            MemoryPoolSummary heap = extractPoolSummary(trace, 13);
+            SurvivorMemoryPoolSummary survivor = extractSurvivorPoolSummary(trace, 9);
+            forwardReference.addMemorySummary(edenSummary, survivor, heap);
+            publish(forwardReference);
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
     }
 
     /*************************/
@@ -1102,12 +1109,12 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         if (concurrentPhaseStartTimeStamp == null)
             concurrentPhaseStartTimeStamp = getClock();
 
-        if ("root-region-scan".equals(trace.getGroup(4))) {
-            record(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, trace.getDuration()));
-        } else if ("mark".equals(trace.getGroup(4))) {
-            record(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, trace.getDuration()));
-        } else if ("cleanup".equals(trace.getGroup(4))) {
-            record(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, trace.getDuration()));
+        if ("root-region-scan".equals(trace.getGroup(7))) {
+            publish(new ConcurrentScanRootRegion(concurrentPhaseStartTimeStamp, trace.getDuration()));
+        } else if ("mark".equals(trace.getGroup(7))) {
+            publish(new G1ConcurrentMark(concurrentPhaseStartTimeStamp, trace.getDuration()));
+        } else if ("cleanup".equals(trace.getGroup(7))) {
+            publish(new G1ConcurrentCleanup(concurrentPhaseStartTimeStamp, trace.getDuration()));
         } else
             trace.notYetImplemented();
     }
@@ -1140,46 +1147,40 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
     }
 
     private MemoryPoolSummary extractPoolSummary(GCLogTrace trace, int offset) {
-        long occupancyBefore = Math.round(toKBytes(trace.getDoubleGroup(offset), trace.getGroup(1 + offset)));
-        long sizeBefore = Math.round(toKBytes(trace.getDoubleGroup(2 + offset), trace.getGroup(3 + offset)));
-        long occupancyAfter = Math.round(toKBytes(trace.getDoubleGroup(4 + offset), trace.getGroup(5 + offset)));
-        long size = Math.round(toKBytes(trace.getDoubleGroup(6 + offset), trace.getGroup(7 + offset)));
+        long occupancyBefore = trace.doubleToKBytes(offset);
+        long sizeBefore = trace.doubleToKBytes(offset + 2);
+        long occupancyAfter = trace.doubleToKBytes(offset + 4);
+        long size = trace.doubleToKBytes(offset + 6);
         return new MemoryPoolSummary(occupancyBefore, sizeBefore, occupancyAfter, size);
     }
 
     private SurvivorMemoryPoolSummary extractSurvivorPoolSummary(GCLogTrace trace, int offset) {
-        long occupancyBefore = Math.round(toKBytes(trace.getDoubleGroup(offset), trace.getGroup(1 + offset)));
-        long occupancyAfter = Math.round(toKBytes(trace.getDoubleGroup(2 + offset), trace.getGroup(3 + offset)));
+        long occupancyBefore = trace.doubleToKBytes(offset);
+        long occupancyAfter = trace.doubleToKBytes(offset + 2);
         return new SurvivorMemoryPoolSummary(occupancyBefore, occupancyAfter);
     }
 
     /**
      * Maintain time ordering of records. Concurrent phases are recorded at start time and thus
      * other phases may mix in.
-     *
-     * @throws InterruptedException
      */
-    private void drainBacklog() throws InterruptedException {
+    private void drainBacklog() {
         if (backlog.size() > 0)
             for (JVMEvent event : backlog)
-                consumer.record(event);
+                super.publish(ChannelName.G1GC_PARSER_OUTBOX,event);
     }
 
-    public void record(G1GCConcurrentEvent concurrentEvent) {
-        try {
-            consumer.record(concurrentEvent);
-            drainBacklog();
-        } catch (InterruptedException e) {
-            LOGGER.log(Level.INFO, e.getMessage(), e);
-        }
+    public void publish(G1GCConcurrentEvent concurrentEvent) {
+        super.publish(ChannelName.G1GC_PARSER_OUTBOX,concurrentEvent);
+        drainBacklog();
     }
 
     private void recordCPUSummary(GCLogTrace trace, String line) {
         forwardReference.addCPUSummary(new CPUSummary(trace.getDoubleGroup(1), trace.getDoubleGroup(2), trace.getDoubleGroup(3)));
-        record(forwardReference);
+        publish(forwardReference);
     }
 
-    public void record(G1GCPauseEvent collection) {
+    public void publish(G1GCPauseEvent collection) {
 
         if (collection == trap) {
             LOGGER.warning("Parsing Error: Attempt to record Trap @" + getClock().getTimeStamp());
@@ -1190,7 +1191,7 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         if ((collection.getCpuSummary() == null) && (diary == null || diary.isPrintGCDetails())) {
             forwardReference = collection;
         } else {
-            consumer.record(collection);
+            super.publish(ChannelName.G1GC_PARSER_OUTBOX, collection);
             forwardReference = trap;
             collectionTypeForwardReference = null;
             referenceGCForwardReferenceSummary = null;
@@ -1203,10 +1204,17 @@ public class PreUnifiedG1GCParser extends PreUnifiedGCLogParser implements G1GCP
         if (line.startsWith("Memory: ")) return;
         if (line.startsWith("CommandLine flags: ")) return;
 
-        if (debugging)
-            LOGGER.fine("Missed: " + line);
-
+        GCToolKit.LOG_DEBUG_MESSAGE(() -> "Missed: " + line);
         LOGGER.log(Level.FINE, "Missed: {0}", line);
+    }
 
+    @Override
+    public boolean accepts(Diary diary) {
+        return diary.isG1GC() && ! diary.isUnifiedLogging();
+    }
+
+    @Override
+    public void publishTo(JVMEventChannel bus) {
+        super.publishTo(bus);
     }
 }

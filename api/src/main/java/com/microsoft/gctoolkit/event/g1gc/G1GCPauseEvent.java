@@ -7,12 +7,14 @@ import com.microsoft.gctoolkit.event.GCCause;
 import com.microsoft.gctoolkit.event.GarbageCollectionTypes;
 import com.microsoft.gctoolkit.event.MemoryPoolSummary;
 import com.microsoft.gctoolkit.event.ReferenceGCSummary;
+import com.microsoft.gctoolkit.event.RegionSummary;
 import com.microsoft.gctoolkit.event.SurvivorMemoryPoolSummary;
 import com.microsoft.gctoolkit.time.DateTimeStamp;
 
 public abstract class G1GCPauseEvent extends G1GCEvent {
 
-    private final MemoryPoolSummary NULL_POOL = new MemoryPoolSummary(-1L, -1L, -1L, -1L);
+    private static final MemoryPoolSummary NULL_POOL = new MemoryPoolSummary(-1L, -1L, -1L, -1L);
+    private static final RegionSummary NULL_REGION = new RegionSummary(-1, -1, -1);
 
     private MemoryPoolSummary eden;
     private SurvivorMemoryPoolSummary survivor;
@@ -20,7 +22,14 @@ public abstract class G1GCPauseEvent extends G1GCEvent {
     private MemoryPoolSummary permOrMetaspace;
     private ReferenceGCSummary referenceGCSummary = null;
 
+    private RegionSummary edenRegion;
+    private RegionSummary survivorRegion;
+    private RegionSummary oldRegion;
+    private RegionSummary humongousRegion;
+    private RegionSummary archiveRegion;
+
     private CPUSummary cpuSummary;
+    private int heapRegionSize;
 
     public G1GCPauseEvent(DateTimeStamp timeStamp, GarbageCollectionTypes type, GCCause cause, double duration) {
         super(timeStamp, type, cause, duration);
@@ -44,6 +53,34 @@ public abstract class G1GCPauseEvent extends G1GCEvent {
         this.cpuSummary = summary;
     }
 
+    public void addRegionSummary(RegionSummary eden, RegionSummary survivor, RegionSummary old, RegionSummary humongous, RegionSummary archive) {
+        this.edenRegion = eden;
+        this.survivorRegion = survivor;
+        this.oldRegion = old;
+        this.humongousRegion = humongous;
+        this.archiveRegion = archive;
+    }
+
+    public RegionSummary getEdenRegionSummary() {
+        return this.edenRegion == null ? NULL_REGION : this.edenRegion;
+    }
+
+    public RegionSummary getSurvivorRegionSummary() {
+        return this.survivorRegion == null ? NULL_REGION : this.survivorRegion;
+    }
+
+    public RegionSummary getOldRegionSummary() {
+        return this.oldRegion == null ? NULL_REGION : this.oldRegion;
+    }
+
+    public RegionSummary getHumongousRegionSummary() {
+        return this.humongousRegion == null ? NULL_REGION : this.humongousRegion;
+    }
+
+    public RegionSummary getArchiveRegionSummary() {
+        return this.archiveRegion == null ? NULL_REGION : this.archiveRegion;
+    }
+
     public MemoryPoolSummary getEden() {
         return this.eden;
     }
@@ -64,15 +101,17 @@ public abstract class G1GCPauseEvent extends G1GCEvent {
         if ((getEden() == null) || (getHeap() == null)) {
             return NULL_POOL;
         } else if (getSurvivor() == null) {
-            return new MemoryPoolSummary(getHeap().getOccupancyBeforeCollection() - this.getEden().getOccupancyBeforeCollection(),
-                    getHeap().getSizeBeforeCollection() - getEden().getSizeBeforeCollection(),
-                    getHeap().getOccupancyAfterCollection() - getEden().getOccupancyAfterCollection(),
-                    getHeap().getSizeAfterCollection() - getEden().getSizeAfterCollection());
+            return getHeap().minus(getEden());
         } else {
-            return new MemoryPoolSummary(getHeap().getOccupancyBeforeCollection() - this.getEden().getOccupancyBeforeCollection(),
-                    getHeap().getSizeBeforeCollection() - getEden().getSizeBeforeCollection() - getSurvivor().getOccupancyBeforeCollection(),
-                    getHeap().getOccupancyAfterCollection() - getEden().getOccupancyAfterCollection() - getSurvivor().getOccupancyAfterCollection(),
-                    getHeap().getSizeAfterCollection() - getEden().getSizeAfterCollection());
+            final RegionSummary summary = getArchiveRegionSummary();
+            final long archiveRegionByteBefore = summary.getBefore() * heapRegionSize * 1024L;
+            final long archiveRegionByteAfter = summary.getAfter() * heapRegionSize * 1024L;
+            final long archiveRegionByteAssigned = summary.getAssigned() * heapRegionSize * 1024L;
+
+            return new MemoryPoolSummary(getHeap().getOccupancyBeforeCollection() - this.getEden().getOccupancyBeforeCollection() - getSurvivor().getOccupancyBeforeCollection() - archiveRegionByteAssigned,
+                    getHeap().getSizeBeforeCollection() - getEden().getSizeBeforeCollection() - getSurvivor().getOccupancyBeforeCollection() - archiveRegionByteBefore,
+                    getHeap().getOccupancyAfterCollection() - getEden().getOccupancyAfterCollection() - getSurvivor().getOccupancyAfterCollection() - archiveRegionByteAssigned,
+                    getHeap().getSizeAfterCollection() - getEden().getSizeAfterCollection() - getSurvivor().getOccupancyAfterCollection() - archiveRegionByteAfter);
         }
     }
 
@@ -88,4 +127,7 @@ public abstract class G1GCPauseEvent extends G1GCEvent {
         return this.cpuSummary;
     }
 
+    public void addHeapRegionSize(int heapRegionSize) {
+        this.heapRegionSize = heapRegionSize;
+    }
 }

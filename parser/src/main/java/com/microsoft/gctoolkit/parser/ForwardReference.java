@@ -4,8 +4,8 @@ package com.microsoft.gctoolkit.parser;
 
 import com.microsoft.gctoolkit.event.CPUSummary;
 import com.microsoft.gctoolkit.event.GCCause;
-import com.microsoft.gctoolkit.time.DateTimeStamp;
 import com.microsoft.gctoolkit.parser.jvm.Decorators;
+import com.microsoft.gctoolkit.time.DateTimeStamp;
 
 public class ForwardReference {
 
@@ -16,12 +16,13 @@ public class ForwardReference {
     private GCCause gcCause = GCCause.UNKNOWN_GCCAUSE;
     private CPUSummary cpuSummary = null;
 
-    public ForwardReference(Decorators decorators, int id) {
+    ForwardReference(Decorators decorators, int id) {
         this.gcID = id;
         this.decorators = decorators;
+        this.startTime = decorators.getDateTimeStamp();
     }
 
-    public int getGcID() {
+    int getGcID() {
         return gcID;
     }
 
